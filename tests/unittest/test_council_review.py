@@ -258,6 +258,7 @@ class FakeAiHandler:
             "system": system,
             "user": user,
             "inference_settings": inference_settings,
+            "deployment_id": get_settings().get("openai.deployment_id", None),
         })
         FakeAiHandler.active_calls += 1
         FakeAiHandler.max_active_calls = max(FakeAiHandler.max_active_calls, FakeAiHandler.active_calls)
@@ -509,6 +510,39 @@ def test_member_and_peer_calls_do_not_use_global_fallback_models(monkeypatch, co
     assert "fallback-model" not in [call["model"] for call in FakeAiHandler.calls]
 
 
+def test_failed_member_and_peer_calls_do_not_retry_with_global_fallback_models(monkeypatch, council_settings):
+    original_fallback_models = copy.deepcopy(council_settings.config.fallback_models)
+    council_settings.config.fallback_models = ["global-fallback"]
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}, {"model": "member-c"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    peer_ranking = _VALID_PEER_EVALUATION.replace("response_2", "response_3")
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": RuntimeError("member unavailable"),
+        "member-c": _VALID_REVIEW,
+        "member-a:peer": peer_ranking,
+        "member-b:peer": RuntimeError("peer unavailable"),
+        "member-c:peer": peer_ranking,
+        "chair": _VALID_REVIEW,
+        "global-fallback": _VALID_REVIEW,
+    })
+
+    try:
+        result = asyncio.run(_runner(config).run())
+    finally:
+        council_settings.config.fallback_models = original_fallback_models
+
+    assert result.metadata["failed_member_count"] == 1
+    assert result.metadata["failed_peer_evaluation_count"] == 1
+    assert "global-fallback" not in [call["model"] for call in FakeAiHandler.calls]
+
+
 def test_incremental_council_uses_current_scoped_provider_evidence_for_each_member(monkeypatch, council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
@@ -742,6 +776,160 @@ def test_optional_prompt_fields_are_required_when_enabled(monkeypatch, council_s
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b"]
 
 
+def test_chair_fallbacks_are_attempted_in_order_with_chair_inference_settings(monkeypatch, council_settings):
+    original_fallback_models = copy.deepcopy(council_settings.config.fallback_models)
+    original_deployment_id = council_settings.get("openai.deployment_id", None)
+    original_fallback_deployments = copy.deepcopy(council_settings.get("openai.fallback_deployments", []))
+    council_settings.config.fallback_models = ["fallback-a", "fallback-b"]
+    council_settings.set("openai.deployment_id", "chair-deployment")
+    council_settings.set("openai.fallback_deployments", ["fallback-a-deployment", "fallback-b-deployment"])
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair", "temperature": 0.1, "reasoning_effort": "high"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": _VALID_REVIEW,
+        "chair": RuntimeError("chair unavailable"),
+        "fallback-a": RuntimeError("first fallback unavailable"),
+        "fallback-b": _VALID_REVIEW,
+    })
+
+    try:
+        result = asyncio.run(_runner(config).run())
+        assert council_settings.get("openai.deployment_id", None) == "chair-deployment"
+    finally:
+        council_settings.config.fallback_models = original_fallback_models
+        council_settings.set("openai.deployment_id", original_deployment_id)
+        council_settings.set("openai.fallback_deployments", original_fallback_deployments)
+
+    chair_calls = [call for call in FakeAiHandler.calls if call["stage"] == "chair"]
+    assert [call["model"] for call in chair_calls] == ["chair", "fallback-a", "fallback-b"]
+    assert [call["deployment_id"] for call in chair_calls] == [
+        "chair-deployment",
+        "fallback-a-deployment",
+        "fallback-b-deployment",
+    ]
+    assert all(call["inference_settings"] == config.chair.inference_settings for call in chair_calls)
+    assert result.metadata["chair_model"] == "fallback-b"
+    assert result.metadata["synthesis_strategy"] == "chair"
+
+
+def test_member_fallback_uses_borda_winner_after_all_chairs_fail(monkeypatch, council_settings):
+    original_fallback_models = copy.deepcopy(council_settings.config.fallback_models)
+    council_settings.config.fallback_models = ["fallback-chair"]
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}, {"model": "member-c"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    review_a = _VALID_REVIEW.replace("Yes", "member-a")
+    review_b = _VALID_REVIEW.replace("Yes", "member-b")
+    review_c = _VALID_REVIEW.replace("Yes", "member-c")
+    ranking_a = _VALID_PEER_EVALUATION.replace(
+        "  - response_1\n  - response_2",
+        "  - response_2\n  - response_1\n  - response_3",
+    )
+    ranking_b = ranking_a.replace(
+        "  - response_2\n  - response_1\n  - response_3",
+        "  - response_2\n  - response_3\n  - response_1",
+    )
+    _reset_fake_handler({
+        "member-a": review_a,
+        "member-b": review_b,
+        "member-c": review_c,
+        "member-a:peer": ranking_a,
+        "member-b:peer": ranking_b,
+        "member-c:peer": RuntimeError("peer unavailable"),
+        "chair": RuntimeError("chair unavailable"),
+        "fallback-chair": RuntimeError("fallback unavailable"),
+    })
+
+    try:
+        result = asyncio.run(_runner(config).run())
+    finally:
+        council_settings.config.fallback_models = original_fallback_models
+
+    assert yaml.safe_load(result.prediction)["review"]["relevant_tests"].strip() == "member-b"
+    assert result.metadata["chair_model"] is None
+    assert result.metadata["synthesis_strategy"] == "member_fallback"
+
+
+def test_member_fallback_breaks_top_borda_tie_by_configured_member_order(monkeypatch, council_settings):
+    original_fallback_models = copy.deepcopy(council_settings.config.fallback_models)
+    council_settings.config.fallback_models = []
+    config = _peer_enabled_config(council_settings)
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    reverse_ranking = _VALID_PEER_EVALUATION.replace(
+        "  - response_1\n  - response_2",
+        "  - response_2\n  - response_1",
+    )
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW.replace("Yes", "first-member"),
+        "member-b": _VALID_REVIEW.replace("Yes", "second-member"),
+        "member-a:peer": _VALID_PEER_EVALUATION,
+        "member-b:peer": reverse_ranking,
+        "chair": RuntimeError("chair unavailable"),
+    })
+
+    try:
+        result = asyncio.run(_runner(config).run())
+    finally:
+        council_settings.config.fallback_models = original_fallback_models
+
+    assert yaml.safe_load(result.prediction)["review"]["relevant_tests"].strip() == "first-member"
+    assert result.metadata["synthesis_strategy"] == "member_fallback"
+
+
+@pytest.mark.parametrize(
+    "peer_responses",
+    [
+        None,
+        [_VALID_PEER_EVALUATION, RuntimeError("peer unavailable")],
+        ["not yaml: [", "not yaml: ["],
+    ],
+    ids=["absent", "insufficient", "malformed"],
+)
+def test_exhausted_chairs_without_two_valid_rankings_terminate(monkeypatch, council_settings, peer_responses):
+    original_fallback_models = copy.deepcopy(council_settings.config.fallback_models)
+    council_settings.config.fallback_models = ["fallback-chair"]
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": peer_responses is not None,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    responses = {
+        "member-a": _VALID_REVIEW,
+        "member-b": _VALID_REVIEW,
+        "chair": RuntimeError("chair unavailable"),
+        "fallback-chair": RuntimeError("fallback unavailable"),
+    }
+    if peer_responses is not None:
+        responses["member-a:peer"], responses["member-b:peer"] = peer_responses
+    _reset_fake_handler(responses)
+
+    try:
+        with pytest.raises(CouncilReviewError, match="failed during chair synthesis"):
+            asyncio.run(_runner(config).run())
+    finally:
+        council_settings.config.fallback_models = original_fallback_models
+
+    assert [call["model"] for call in FakeAiHandler.calls if call["stage"] == "chair"] == [
+        "chair",
+        "fallback-chair",
+    ]
+
+
 def test_chair_runtime_failure_is_sanitized_for_reviewer_publication(monkeypatch, council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
@@ -749,6 +937,8 @@ def test_chair_runtime_failure_is_sanitized_for_reviewer_publication(monkeypatch
         "members": [{"model": "member-a"}, {"model": "member-b"}],
         "chair": {"model": "chair"},
     })
+    original_fallback_models = copy.deepcopy(council_settings.config.fallback_models)
+    council_settings.config.fallback_models = []
     config = resolve_council_review_config()
     monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
     _reset_fake_handler({
@@ -757,8 +947,11 @@ def test_chair_runtime_failure_is_sanitized_for_reviewer_publication(monkeypatch
         "chair": RuntimeError("provider secret should not be published"),
     })
 
-    with pytest.raises(CouncilReviewError, match="failed during chair synthesis") as exc_info:
-        asyncio.run(_runner(config).run())
+    try:
+        with pytest.raises(CouncilReviewError, match="failed during chair synthesis") as exc_info:
+            asyncio.run(_runner(config).run())
+    finally:
+        council_settings.config.fallback_models = original_fallback_models
 
     assert "provider secret" not in exc_info.value.public_message
 
