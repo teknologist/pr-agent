@@ -15,7 +15,7 @@ from pr_agent.algo.ai_handlers.base_ai_handler import (
     ModelInferenceSettings,
     UNSET,
 )
-from pr_agent.algo.pr_processing import get_pr_diff
+from pr_agent.algo.pr_processing import _get_all_deployments, get_pr_diff
 from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.utils import load_yaml
 from pr_agent.config_loader import get_settings
@@ -240,11 +240,39 @@ class CouncilReviewRunner:
                 else:
                     peer_evaluations.append(result)
 
+        chair_response = None
+        chair_metadata = {}
+        chair_model = None
+        chair_models = [self.config.chair.model, *_get_fallback_models()]
         try:
-            chair_response, chair_metadata = await self._run_chair(successful_reviews, peer_evaluations)
+            chair_attempts = zip(chair_models, _get_all_deployments(chair_models))
+            for model, deployment_id in chair_attempts:
+                try:
+                    get_settings().set("openai.deployment_id", deployment_id)
+                    chair_response, chair_metadata = await self._run_chair(
+                        model,
+                        successful_reviews,
+                        peer_evaluations,
+                    )
+                    chair_model = model
+                    break
+                except Exception as exc:
+                    get_logger().warning(
+                        "Council chair synthesis failed",
+                        artifact={"model": model, "error": str(exc)},
+                    )
         except Exception as exc:
-            get_logger().warning("Council chair synthesis failed", artifact={"error": str(exc)})
+            get_logger().warning("Council chair fallback configuration failed", artifact={"error": str(exc)})
             raise CouncilReviewError("Council Review failed during chair synthesis.") from exc
+
+        synthesis_strategy = "chair"
+        if chair_response is None:
+            member_fallback = _select_member_fallback(successful_reviews, peer_evaluations)
+            if member_fallback is None:
+                raise CouncilReviewError("Council Review failed during chair synthesis.")
+            chair_response = yaml.safe_dump(member_fallback.parsed, sort_keys=False)
+            chair_model = None
+            synthesis_strategy = "member_fallback"
 
         metadata = {
             "strategy": "council_review",
@@ -254,7 +282,8 @@ class CouncilReviewRunner:
             "peer_evaluation_enabled": self.config.peer_evaluation,
             "successful_peer_evaluation_count": len(peer_evaluations),
             "failed_peer_evaluation_count": failed_peer_evaluations,
-            "chair_model": self.config.chair.model,
+            "chair_model": chair_model,
+            "synthesis_strategy": synthesis_strategy,
             "warnings": chair_metadata.get("warnings", []),
         }
         return CouncilReviewResult(prediction=chair_response, metadata=metadata)
@@ -322,6 +351,7 @@ class CouncilReviewRunner:
 
     async def _run_chair(
         self,
+        model: str,
         member_reviews: list[CouncilMemberReview],
         peer_evaluations: list[CouncilPeerEvaluation],
     ) -> tuple[str, dict[str, Any]]:
@@ -336,7 +366,7 @@ class CouncilReviewRunner:
         system_prompt = _render_prompt(get_settings().pr_council_review_prompt.system, variables)
         user_prompt = _render_prompt(get_settings().pr_council_review_prompt.user, variables)
         result = await self.ai_handler.chat_completion_with_metadata(
-            model=self.config.chair.model,
+            model=model,
             system=system_prompt,
             user=user_prompt,
             inference_settings=self.config.chair.inference_settings,
@@ -348,6 +378,31 @@ class CouncilReviewRunner:
         handler = self.ai_handler_factory()
         handler.main_pr_language = self.main_language
         return handler
+
+
+def _get_fallback_models() -> list[str]:
+    fallback_models = get_settings().config.fallback_models
+    if isinstance(fallback_models, str):
+        fallback_models = fallback_models.split(",")
+    return [model.strip() for model in fallback_models if isinstance(model, str) and model.strip()]
+
+
+def _select_member_fallback(
+    member_reviews: list[CouncilMemberReview],
+    peer_evaluations: list[CouncilPeerEvaluation],
+) -> CouncilMemberReview | None:
+    if len(peer_evaluations) < 2:
+        return None
+
+    scores = {review.label: 0 for review in member_reviews}
+    for evaluation in peer_evaluations:
+        ranking = evaluation.parsed["peer_evaluation"]["ranking"]
+        if len(ranking) != len(scores) or set(ranking) != set(scores):
+            return None
+        for points, label in enumerate(reversed(ranking)):
+            scores[label] += points
+
+    return max(member_reviews, key=lambda review: scores[review.label], default=None)
 
 
 def _render_prompt(template: str, variables: dict[str, Any]) -> str:
