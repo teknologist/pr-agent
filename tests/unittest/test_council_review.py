@@ -472,6 +472,26 @@ def test_optional_prompt_fields_are_required_when_enabled(monkeypatch, council_s
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b"]
 
 
+def test_chair_runtime_failure_is_sanitized_for_reviewer_publication(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": _VALID_REVIEW,
+        "chair": RuntimeError("provider secret should not be published"),
+    })
+
+    with pytest.raises(CouncilReviewError, match="failed during chair synthesis") as exc_info:
+        asyncio.run(_runner(config).run())
+
+    assert "provider secret" not in exc_info.value.public_message
+
+
 def test_ticket_prompt_examples_match_the_structured_review_schema():
     prompt = get_settings().pr_review_prompt.system + get_settings().pr_review_prompt.user
 

@@ -206,7 +206,12 @@ class CouncilReviewRunner:
         if len(successful_reviews) < 2:
             raise CouncilReviewError("Council Review failed because fewer than two members returned parseable reviews.")
 
-        chair_response, chair_metadata = await self._run_chair(successful_reviews)
+        try:
+            chair_response, chair_metadata = await self._run_chair(successful_reviews)
+        except Exception as exc:
+            get_logger().warning("Council chair synthesis failed", artifact={"error": str(exc)})
+            raise CouncilReviewError("Council Review failed during chair synthesis.") from exc
+
         metadata = {
             "strategy": "council_review",
             "member_count": len(self.config.members),
