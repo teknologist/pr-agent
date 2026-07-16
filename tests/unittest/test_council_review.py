@@ -45,6 +45,14 @@ _VALID_REVIEW_WITH_NUMBERED_DIFF_FINDING = _VALID_REVIEW_WITH_FINDING.replace(
     "API_KEY = 'topsecret'",
 )
 
+_VALID_PEER_EVALUATION = """peer_evaluation:
+  ranking:
+  - response_1
+  - response_2
+  rationale: |
+    response_1 is more specific.
+"""
+
 
 def _base_vars():
     return {
@@ -86,8 +94,10 @@ def council_settings():
     try:
         settings.pr_review_prompt.system = "member system"
         settings.pr_review_prompt.user = "member user {{ diff }}"
+        settings.pr_council_review_prompt.peer_system = "peer system"
+        settings.pr_council_review_prompt.peer_user = "peer user {{ member_reviews }}"
         settings.pr_council_review_prompt.system = "chair system"
-        settings.pr_council_review_prompt.user = "chair user {{ member_reviews }}"
+        settings.pr_council_review_prompt.user = "chair user {{ member_reviews }} {{ peer_evaluations }}"
         yield settings
     finally:
         settings.set("pr_council_review", original_council)
@@ -131,6 +141,7 @@ def test_absent_configuration_selects_standard_review(council_settings):
 def test_enabled_configuration_rejects_malformed_rosters_or_inference_settings(council_settings, members):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": members,
         "chair": {"model": "chair"},
     })
@@ -166,6 +177,7 @@ def test_enabled_configuration_rejects_non_boolean_enabled(council_settings):
 def test_enabled_configuration_accepts_members_and_chair(council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": [
             {"model": "model-a", "temperature": 0.1, "reasoning_effort": "high"},
             {"model": "model-b", "temperature": 0.2},
@@ -180,11 +192,43 @@ def test_enabled_configuration_accepts_members_and_chair(council_settings):
     assert config.chair.model == "chair"
 
 
+def test_peer_evaluation_is_enabled_by_default_and_can_be_disabled(council_settings):
+    section = {
+        "enabled": True,
+        "members": [{"model": "model-a"}, {"model": "model-b"}],
+        "chair": {"model": "chair"},
+    }
+    council_settings.set("pr_council_review", section)
+
+    assert resolve_council_review_config().peer_evaluation is True
+
+    section["peer_evaluation"] = False
+    council_settings.set("pr_council_review", section)
+
+    assert resolve_council_review_config().peer_evaluation is False
+
+
+def test_peer_evaluation_rejects_non_boolean_configuration(council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": "false",
+        "members": [{"model": "model-a"}, {"model": "model-b"}],
+        "chair": {"model": "chair"},
+    })
+
+    config = resolve_council_review_config()
+
+    assert config.enabled is False
+    assert "peer_evaluation must be boolean" in config.warnings[0]
+
+
 class FakeAiHandler:
     responses_by_model = {}
     calls = []
     active_calls = 0
     max_active_calls = 0
+    active_calls_by_stage = {}
+    max_active_calls_by_stage = {}
     instances = 0
 
     def __init__(self):
@@ -207,17 +251,25 @@ class FakeAiHandler:
         img_path=None,
         inference_settings=None,
     ):
+        stage = "peer" if system == "peer system" else "chair" if system == "chair system" else "member"
         FakeAiHandler.calls.append({
             "model": model,
+            "stage": stage,
             "system": system,
             "user": user,
             "inference_settings": inference_settings,
         })
         FakeAiHandler.active_calls += 1
         FakeAiHandler.max_active_calls = max(FakeAiHandler.max_active_calls, FakeAiHandler.active_calls)
+        FakeAiHandler.active_calls_by_stage[stage] = FakeAiHandler.active_calls_by_stage.get(stage, 0) + 1
+        FakeAiHandler.max_active_calls_by_stage[stage] = max(
+            FakeAiHandler.max_active_calls_by_stage.get(stage, 0),
+            FakeAiHandler.active_calls_by_stage[stage],
+        )
         await asyncio.sleep(0.01)
         FakeAiHandler.active_calls -= 1
-        response = FakeAiHandler.responses_by_model[model]
+        FakeAiHandler.active_calls_by_stage[stage] -= 1
+        response = FakeAiHandler.responses_by_model.get(f"{model}:{stage}", FakeAiHandler.responses_by_model[model])
         if isinstance(response, BaseException):
             raise response
         return SimpleNamespace(response=response, finish_reason="stop", metadata={"warnings": []})
@@ -228,6 +280,8 @@ def _reset_fake_handler(responses_by_model):
     FakeAiHandler.calls = []
     FakeAiHandler.active_calls = 0
     FakeAiHandler.max_active_calls = 0
+    FakeAiHandler.active_calls_by_stage = {}
+    FakeAiHandler.max_active_calls_by_stage = {}
     FakeAiHandler.instances = 0
 
 
@@ -242,9 +296,20 @@ def _runner(config):
     )
 
 
+def _peer_enabled_config(council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    return resolve_council_review_config()
+
+
 def test_successful_council_uses_member_models_model_specific_diffs_and_returns_metadata(monkeypatch, council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": [{"model": "member-a"}, {"model": "member-b"}],
         "chair": {"model": "chair"},
     })
@@ -274,6 +339,108 @@ def test_successful_council_uses_member_models_model_specific_diffs_and_returns_
     assert "raw diff" not in FakeAiHandler.calls[-1]["user"]
 
 
+def test_disabled_peer_evaluation_skips_stage_and_chair_receives_no_evaluations(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({"member-a": _VALID_REVIEW, "member-b": _VALID_REVIEW, "chair": _VALID_REVIEW})
+
+    result = asyncio.run(_runner(config).run())
+
+    chair_call = [call for call in FakeAiHandler.calls if call["stage"] == "chair"][0]
+    assert [call for call in FakeAiHandler.calls if call["stage"] == "peer"] == []
+    assert result.metadata["peer_evaluation_enabled"] is False
+    assert result.metadata["successful_peer_evaluation_count"] == 0
+    assert result.metadata["failed_peer_evaluation_count"] == 0
+    assert "evaluator_" not in chair_call["user"]
+
+
+def test_peer_evaluations_are_anonymized_concurrent_and_available_to_chair(monkeypatch, council_settings):
+    config = _peer_enabled_config(council_settings)
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw secret diff")
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": _VALID_REVIEW,
+        "member-a:peer": _VALID_PEER_EVALUATION,
+        "member-b:peer": _VALID_PEER_EVALUATION,
+        "chair": _VALID_REVIEW,
+    })
+
+    result = asyncio.run(_runner(config).run())
+
+    peer_calls = [call for call in FakeAiHandler.calls if call["stage"] == "peer"]
+    chair_call = [call for call in FakeAiHandler.calls if call["stage"] == "chair"][0]
+    assert [call["model"] for call in peer_calls] == ["member-a", "member-b"]
+    assert FakeAiHandler.max_active_calls_by_stage["peer"] == 2
+    assert all("response_1" in call["user"] and "response_2" in call["user"] for call in peer_calls)
+    assert all("member-a" not in call["user"] and "member-b" not in call["user"] for call in peer_calls)
+    assert all("raw secret diff" not in call["user"] for call in peer_calls)
+    assert "peer_evaluation" in chair_call["user"]
+    assert "response_1" in chair_call["user"]
+    assert "raw secret diff" not in chair_call["user"]
+    assert result.metadata["successful_peer_evaluation_count"] == 2
+    assert result.metadata["failed_peer_evaluation_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("peer_a", "peer_b", "successful_count", "failed_count"),
+    [
+        (_VALID_PEER_EVALUATION, RuntimeError("peer unavailable"), 1, 1),
+        ("not yaml: [", RuntimeError("peer unavailable"), 0, 2),
+    ],
+)
+def test_peer_evaluation_failures_are_best_effort(
+    monkeypatch,
+    council_settings,
+    peer_a,
+    peer_b,
+    successful_count,
+    failed_count,
+):
+    config = _peer_enabled_config(council_settings)
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": _VALID_REVIEW,
+        "member-a:peer": peer_a,
+        "member-b:peer": peer_b,
+        "chair": _VALID_REVIEW,
+    })
+
+    result = asyncio.run(_runner(config).run())
+
+    chair_call = [call for call in FakeAiHandler.calls if call["stage"] == "chair"][0]
+    assert result.metadata["successful_peer_evaluation_count"] == successful_count
+    assert result.metadata["failed_peer_evaluation_count"] == failed_count
+    assert chair_call["user"].count("evaluator_") == successful_count
+
+
+def test_member_and_peer_calls_do_not_use_global_fallback_models(monkeypatch, council_settings):
+    original_fallback_models = copy.deepcopy(council_settings.config.fallback_models)
+    council_settings.config.fallback_models = ["fallback-model"]
+    config = _peer_enabled_config(council_settings)
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": _VALID_REVIEW,
+        "member-a:peer": _VALID_PEER_EVALUATION,
+        "member-b:peer": _VALID_PEER_EVALUATION,
+        "chair": _VALID_REVIEW,
+    })
+
+    try:
+        asyncio.run(_runner(config).run())
+    finally:
+        council_settings.config.fallback_models = original_fallback_models
+
+    assert "fallback-model" not in [call["model"] for call in FakeAiHandler.calls]
+
+
 @pytest.mark.parametrize(
     ("source_diff", "member_review", "secret_text"),
     [
@@ -291,6 +458,7 @@ def test_member_review_diff_content_is_redacted_before_chair(
 ):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": [{"model": "member-a"}, {"model": "member-b"}],
         "chair": {"model": "chair"},
     })
@@ -315,6 +483,7 @@ def test_malformed_member_does_not_count_toward_quorum_but_successful_reviews_go
 ):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": [{"model": "member-a"}, {"model": "member-b"}, {"model": "member-c"}],
         "chair": {"model": "chair"},
     })
@@ -333,7 +502,7 @@ def test_malformed_member_does_not_count_toward_quorum_but_successful_reviews_go
     assert result.metadata["successful_member_count"] == 2
     assert result.metadata["failed_member_count"] == 1
     assert chair_call["model"] == "chair"
-    assert chair_call["user"].count("Member Review") == 2
+    assert chair_call["user"].count("response_") == 2
     assert "raw diff" not in chair_call["user"]
 
 
@@ -375,6 +544,7 @@ def test_malformed_member_does_not_count_toward_quorum_but_successful_reviews_go
 def test_structurally_invalid_member_does_not_count_toward_quorum(monkeypatch, council_settings, invalid_review):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": [{"model": "member-a"}, {"model": "member-b"}],
         "chair": {"model": "chair"},
     })
@@ -391,6 +561,7 @@ def test_structurally_invalid_member_does_not_count_toward_quorum(monkeypatch, c
 def test_cancelled_member_is_a_failed_result_and_does_not_corrupt_quorum(monkeypatch, council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": [{"model": "member-a"}, {"model": "member-b"}, {"model": "member-c"}],
         "chair": {"model": "chair"},
     })
@@ -413,6 +584,7 @@ def test_cancelled_member_is_a_failed_result_and_does_not_corrupt_quorum(monkeyp
 def test_numeric_and_boolean_standard_review_scalars_are_normalized(monkeypatch, council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": [{"model": "member-a"}, {"model": "member-b"}],
         "chair": {"model": "chair"},
     })
@@ -450,6 +622,7 @@ def test_numeric_and_boolean_standard_review_scalars_are_normalized(monkeypatch,
 def test_optional_prompt_fields_are_required_when_enabled(monkeypatch, council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": [{"model": "member-a"}, {"model": "member-b"}],
         "chair": {"model": "chair"},
     })
@@ -475,6 +648,7 @@ def test_optional_prompt_fields_are_required_when_enabled(monkeypatch, council_s
 def test_chair_runtime_failure_is_sanitized_for_reviewer_publication(monkeypatch, council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": [{"model": "member-a"}, {"model": "member-b"}],
         "chair": {"model": "chair"},
     })
@@ -502,6 +676,7 @@ def test_ticket_prompt_examples_match_the_structured_review_schema():
 def test_no_quorum_raises_without_chair_or_standard_review_fallback(monkeypatch, council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
+        "peer_evaluation": False,
         "members": [{"model": "member-a"}, {"model": "member-b"}],
         "chair": {"model": "chair"},
     })

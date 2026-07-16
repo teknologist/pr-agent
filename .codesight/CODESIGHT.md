@@ -4,7 +4,7 @@
 
 > 10 routes | 0 models | 0 components | 80 lib files | 45 env vars | 4 middleware | 20% test coverage
 > **Token savings:** this file is ~6,700 tokens. Without it, AI exploration would cost ~39,800 tokens. **Saves ~33,200 tokens per conversation.**
-> **Last scanned:** 2026-07-16 15:14 — re-run after significant changes
+> **Last scanned:** 2026-07-16 15:49 — re-run after significant changes
 
 ---
 
@@ -236,9 +236,9 @@
   - class CouncilModelConfig
   - class CouncilReviewConfig
   - class CouncilMemberReview
+  - class CouncilPeerEvaluation
   - class CouncilReviewResult
-  - class CouncilReviewError
-  - _...1 more_
+  - _...2 more_
 - `pr_agent/tools/pr_add_docs.py` — function get_docs_for_language: (language, style), class PRAddDocs
 - `pr_agent/tools/pr_code_suggestions.py` — class PRCodeSuggestions
 - `pr_agent/tools/pr_config.py` — class PRConfig
