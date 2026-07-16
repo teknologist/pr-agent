@@ -225,6 +225,7 @@ def test_peer_evaluation_rejects_non_boolean_configuration(council_settings):
 class FakeAiHandler:
     supports_council_redaction = True
     responses_by_model = {}
+    metadata_by_model = {}
     calls = []
     active_calls = 0
     max_active_calls = 0
@@ -271,14 +272,20 @@ class FakeAiHandler:
         await asyncio.sleep(0.01)
         FakeAiHandler.active_calls -= 1
         FakeAiHandler.active_calls_by_stage[stage] -= 1
-        response = FakeAiHandler.responses_by_model.get(f"{model}:{stage}", FakeAiHandler.responses_by_model[model])
+        response_key = f"{model}:{stage}"
+        response = FakeAiHandler.responses_by_model.get(response_key, FakeAiHandler.responses_by_model[model])
         if isinstance(response, BaseException):
             raise response
-        return SimpleNamespace(response=response, finish_reason="stop", metadata={"warnings": []})
+        metadata = FakeAiHandler.metadata_by_model.get(
+            response_key,
+            FakeAiHandler.metadata_by_model.get(model, {"warnings": []}),
+        )
+        return SimpleNamespace(response=response, finish_reason="stop", metadata=metadata)
 
 
-def _reset_fake_handler(responses_by_model):
+def _reset_fake_handler(responses_by_model, metadata_by_model=None):
     FakeAiHandler.responses_by_model = responses_by_model
+    FakeAiHandler.metadata_by_model = metadata_by_model or {}
     FakeAiHandler.calls = []
     FakeAiHandler.active_calls = 0
     FakeAiHandler.max_active_calls = 0
@@ -1076,6 +1083,31 @@ def test_council_logs_and_metadata_exclude_raw_outputs(monkeypatch, council_sett
     }
     assert all({"strategy", "stage", "role", "model", "duration_ms", "outcome"} <= set(call)
                for call in result.metadata["calls"])
+
+
+def test_council_token_usage_metadata_excludes_non_numeric_provider_fields(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    logger = MagicMock()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_logger", lambda: logger)
+    secret = "raw provider prompt and completion"
+    _reset_fake_handler(
+        {"member-a": _VALID_REVIEW, "member-b": _VALID_REVIEW, "chair": _VALID_REVIEW},
+        {"member-a": {"token_usage": {"total_tokens": 17, "raw": secret}}},
+    )
+
+    result = asyncio.run(_runner(config).run())
+
+    member_a = next(call for call in result.metadata["calls"] if call["model"] == "member-a")
+    assert member_a["token_usage"] == {"total_tokens": 17}
+    assert secret not in repr(logger.mock_calls)
+    assert secret not in repr(result.metadata)
 
 
 def test_malformed_member_output_is_redacted_from_parser_logs(monkeypatch, council_settings):

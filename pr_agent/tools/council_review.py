@@ -64,6 +64,7 @@ _TODO_SECTION_SCHEMA = {"relevant_file": str, "line_number": int, "content": str
 _SUB_PR_SCHEMA = {"relevant_files": list, "title": str}
 _NUMBERED_DIFF_LINE = re.compile(r"^\d+\s+[ +\-](.*)$")
 _MAX_COUNCIL_FAN_OUT = 5
+_TOKEN_USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens")
 
 
 @dataclass(frozen=True)
@@ -454,7 +455,7 @@ class CouncilReviewRunner:
             else:
                 result = await asyncio.wait_for(completion, timeout=get_settings().config.ai_timeout)
             result_metadata = result.metadata or {}
-            token_usage = result_metadata.get("token_usage", result_metadata.get("usage"))
+            token_usage = _normalize_token_usage(result_metadata.get("token_usage", result_metadata.get("usage")))
             parsed = parse_response(result.response)
         except asyncio.TimeoutError:
             self._record_call(stage, role, participant.model, started_at, "timeout", token_usage)
@@ -524,6 +525,18 @@ class CouncilReviewRunner:
         if not redaction_enabled:
             raise CouncilReviewError("Council Review requires an AI handler with raw-output redaction support.")
         return handler
+
+
+def _normalize_token_usage(raw_usage: Any) -> dict[str, int] | None:
+    if raw_usage is None:
+        return None
+
+    token_usage = {}
+    for field_name in _TOKEN_USAGE_FIELDS:
+        value = raw_usage.get(field_name) if isinstance(raw_usage, dict) else getattr(raw_usage, field_name, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            token_usage[field_name] = value
+    return token_usage or None
 
 
 def _get_fallback_models() -> list[str]:
