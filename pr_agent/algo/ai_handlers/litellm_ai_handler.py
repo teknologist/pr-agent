@@ -713,7 +713,7 @@ class LiteLLMAIHandler(BaseAiHandler):
                             ),
                         })
 
-                if get_settings().litellm.get("enable_callbacks", False):
+                if get_settings().litellm.get("enable_callbacks", False) and not suppress_raw_logging:
                     kwargs = self.add_litellm_callbacks(kwargs)
 
                 seed = get_settings().config.get("seed", -1)

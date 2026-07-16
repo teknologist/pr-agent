@@ -765,8 +765,14 @@ def load_yaml(
             get_logger().warning("Initial failure to parse AI prediction")
         else:
             get_logger().warning(f"Initial failure to parse AI prediction: {e}")
-        data = try_fix_yaml(response_text, keys_fix_yaml=keys_fix_yaml, first_key=first_key, last_key=last_key,
-                            response_text_original=response_text_original)
+        data = try_fix_yaml(
+            response_text,
+            keys_fix_yaml=keys_fix_yaml,
+            first_key=first_key,
+            last_key=last_key,
+            response_text_original=response_text_original,
+            suppress_raw_logging=suppress_raw_logging,
+        )
         if not data:
             if suppress_raw_logging:
                 get_logger().error("Failed to parse AI prediction after fallbacks")
@@ -786,7 +792,8 @@ def try_fix_yaml(response_text: str,
                  keys_fix_yaml: List[str] = [],
                  first_key="",
                  last_key="",
-                 response_text_original="") -> dict:
+                 response_text_original="",
+                 suppress_raw_logging: bool = False) -> dict:
     response_text_lines = response_text.split('\n')
 
     keys_yaml = ['relevant line:', 'suggestion content:', 'relevant file:', 'existing code:',
@@ -841,7 +848,10 @@ def try_fix_yaml(response_text: str,
             get_logger().info(f"Successfully parsed AI prediction after extracting yaml snippet")
             return data
         except Exception as e:
-            get_logger().debug(f"Failed to parse AI prediction after extracting yaml snippet: {e}")
+            if suppress_raw_logging:
+                get_logger().debug("Failed to parse AI prediction after extracting yaml snippet")
+            else:
+                get_logger().debug(f"Failed to parse AI prediction after extracting yaml snippet: {e}")
 
 
     # third fallback - try to remove leading and trailing curly brackets

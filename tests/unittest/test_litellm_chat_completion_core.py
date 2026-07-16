@@ -71,6 +71,27 @@ async def test_metadata_completion_can_suppress_raw_council_logging(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_metadata_completion_disables_content_callbacks_for_council(monkeypatch):
+    settings = FakeSettings(config_values={"seed": -1})
+    settings.litellm = FakeBox({"enable_callbacks": True})
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: settings)
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response("raw chair output")
+        handler = litellm_handler.LiteLLMAIHandler()
+        handler.suppress_raw_logging = True
+        handler.add_litellm_callbacks = MagicMock()
+
+        await handler.chat_completion_with_metadata(
+            model="gpt-4o",
+            system="raw member prompt",
+            user="raw peer ranking",
+        )
+
+    handler.add_litellm_callbacks.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_metadata_completion_suppresses_raw_council_error_logging(monkeypatch):
     class FakeAPIError(Exception):
         pass

@@ -1077,7 +1077,7 @@ def test_malformed_member_output_is_redacted_from_parser_logs(monkeypatch, counc
     secret = "raw member prompt echoed into malformed output"
     _reset_fake_handler({
         "member-a": _VALID_REVIEW,
-        "member-b": f"review: [ {secret}",
+        "member-b": f"```yaml\nreview: [ {secret}\n```",
         "member-c": _VALID_REVIEW,
         "chair": _VALID_REVIEW,
     })
