@@ -515,7 +515,14 @@ class CouncilReviewRunner:
     def _new_handler(self) -> BaseAiHandler:
         handler = self.ai_handler_factory()
         handler.main_pr_language = self.main_language
-        handler.suppress_raw_logging = True
+        enable_redaction = getattr(handler, "enable_council_redaction", None)
+        if callable(enable_redaction):
+            redaction_enabled = enable_redaction()
+        else:
+            redaction_enabled = getattr(handler, "supports_council_redaction", False)
+            handler.suppress_raw_logging = redaction_enabled
+        if not redaction_enabled:
+            raise CouncilReviewError("Council Review requires an AI handler with raw-output redaction support.")
         return handler
 
 

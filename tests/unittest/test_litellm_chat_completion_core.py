@@ -89,6 +89,15 @@ async def test_metadata_completion_disables_content_callbacks_for_council(monkey
         )
 
     handler.add_litellm_callbacks.assert_not_called()
+    assert mock_call.call_args.kwargs["no-log"] is True
+
+
+@pytest.mark.asyncio
+async def test_council_redaction_rejects_disabled_litellm_no_log(monkeypatch):
+    handler = litellm_handler.LiteLLMAIHandler.__new__(litellm_handler.LiteLLMAIHandler)
+    monkeypatch.setattr(litellm_handler.litellm, "global_disable_no_log_param", True)
+
+    assert handler.enable_council_redaction() is False
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,8 @@ OPENAI_RETRIES = 5
 
 
 class OpenAIHandler(BaseAiHandler):
+    supports_council_redaction = True
+
     def __init__(self):
         # Initialize OpenAIHandler specific attributes here
         try:

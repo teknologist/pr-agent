@@ -223,6 +223,7 @@ def test_peer_evaluation_rejects_non_boolean_configuration(council_settings):
 
 
 class FakeAiHandler:
+    supports_council_redaction = True
     responses_by_model = {}
     calls = []
     active_calls = 0
@@ -288,6 +289,7 @@ def _reset_fake_handler(responses_by_model):
 
 class HandlerManagedTimeoutAiHandler:
     manages_ai_timeout = True
+    supports_council_redaction = True
 
     def __init__(self):
         self.main_pr_language = None
@@ -310,6 +312,7 @@ class HandlerManagedTimeoutAiHandler:
 
 
 class LifecycleAiHandler:
+    supports_council_redaction = True
     plans = {}
     events = []
     active_calls = 0
@@ -391,6 +394,19 @@ def _peer_enabled_config(council_settings):
         "chair": {"model": "chair"},
     })
     return resolve_council_review_config()
+
+
+def test_runner_rejects_handler_without_redaction_support(council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+
+    with pytest.raises(CouncilReviewError, match="raw-output redaction support"):
+        _runner(config, ai_handler_factory=SimpleNamespace)
 
 
 def test_successful_council_uses_member_models_model_specific_diffs_and_returns_metadata(monkeypatch, council_settings):

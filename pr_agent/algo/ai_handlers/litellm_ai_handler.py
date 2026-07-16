@@ -36,6 +36,13 @@ class LiteLLMAIHandler(BaseAiHandler):
     """
 
     manages_ai_timeout = True
+    supports_council_redaction = True
+
+    def enable_council_redaction(self) -> bool:
+        """Enable LiteLLM no-log mode unless an administrator disabled it globally."""
+        if getattr(litellm, "global_disable_no_log_param", False):
+            return False
+        return super().enable_council_redaction()
 
     def __init__(self):
         """
@@ -713,7 +720,9 @@ class LiteLLMAIHandler(BaseAiHandler):
                             ),
                         })
 
-                if get_settings().litellm.get("enable_callbacks", False) and not suppress_raw_logging:
+                if suppress_raw_logging:
+                    kwargs["no-log"] = True
+                elif get_settings().litellm.get("enable_callbacks", False):
                     kwargs = self.add_litellm_callbacks(kwargs)
 
                 seed = get_settings().config.get("seed", -1)
