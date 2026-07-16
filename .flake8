@@ -1,7 +1,103 @@
 [flake8]
 max-line-length = 120
-filename =
-    pr_agent/algo/ai_handlers/base_ai_handler.py
-    pr_agent/algo/ai_handlers/litellm_ai_handler.py
-    tests/unittest/test_litellm_chat_completion_core.py
 extend-exclude = .venv,.codesight
+
+# Baseline ignores for pre-existing repository-wide flake8 violations.
+# PYTTECH-7620 touched files remain fully checked while bare `flake8`
+# can run across the repository without hiding unrelated new files.
+per-file-ignores =
+    pr_agent/agent/pr_agent.py: E261,E303,E501,E722,W293
+    pr_agent/algo/__init__.py: E261
+    pr_agent/algo/ai_handlers/langchain_ai_handler.py: E402,E501,E722,F401,W291,W293
+    pr_agent/algo/ai_handlers/litellm_helpers.py: E501,W292
+    pr_agent/algo/ai_handlers/openai_ai_handler.py: F811
+    pr_agent/algo/cli_args.py: E302,E501,F401,W391
+    pr_agent/algo/file_filter.py: E251,E261,E302,E303,E501
+    pr_agent/algo/git_patch_processing.py: E231,E261,E302,E501,E722,F401
+    pr_agent/algo/language_handler.py: E231
+    pr_agent/algo/pr_processing.py: E128,E222,E225,E231,E261,E266,E501,F401,F541,F841
+    pr_agent/algo/skills_loader.py: E203
+    pr_agent/algo/token_handler.py: E261,E501,E722,W293
+    pr_agent/algo/utils.py: E127,E203,E222,E225,E231,E261,E302,E303,E501,E713,E722,F401,F541,F841
+    pr_agent/cli.py: E128,E251,E501,W293
+    pr_agent/config_loader.py: E124,E127,E129,E261,E262,E501,E722
+    pr_agent/custom_merge_loader.py: E261,E262,E302,E501
+    pr_agent/git_providers/azuredevops_provider.py: E117,E127,E128,E225,E251,E261,E501,F401,F541,F841,W293
+    pr_agent/git_providers/bitbucket_provider.py: E111,E117,E127,E211,E231,E252,E261,E262,E265,E301,E303,E501,E722,F541,F841
+    pr_agent/git_providers/bitbucket_server_provider.py: E128,E211,E231,E252,E261,E262,E265,E301,E501,F541,F841,W293
+    pr_agent/git_providers/codecommit_client.py: E501,F541
+    pr_agent/git_providers/codecommit_provider.py: E201,E202,E501,E722
+    pr_agent/git_providers/gerrit_provider.py: E303
+    pr_agent/git_providers/git_provider.py: E128,E227,E231,E251,E252,E261,E265,E266,E301,E302,E303,E501,F541,F841
+    pr_agent/git_providers/gitea_provider.py: E203,E225,E231,E251,E261,E262,E265,E302,E303,E501,E722
+    pr_agent/git_providers/github_provider.py: E117,E128,E211,E225,E231,E251,E261,E262,E265,E303,E501,E722,F541,F841,W291,W293
+    pr_agent/git_providers/gitlab_provider.py: E125,E128,E202,E211,E225,E231,E252,E261,E262,E265,E301,E302,E303,E501,E722,F401,F541,F841
+    pr_agent/git_providers/local_git_provider.py: E501
+    pr_agent/git_providers/utils.py: E501
+    pr_agent/log/__init__.py: E261,E402,F401
+    pr_agent/mosaico/diff_provider.py: E501
+    pr_agent/mosaico/env_bridge.py: E501
+    pr_agent/secret_providers/aws_secrets_manager_provider.py: F401,W291
+    pr_agent/servers/azuredevops_server_webhook.py: E261,E275,E302,E305,E501,F541,F811,W293
+    pr_agent/servers/bitbucket_app.py: E127,E128,E225,E261,E302,E501,E722,F541,F811
+    pr_agent/servers/bitbucket_server_webhook.py: E261,E262,E302,E501,F541,W293
+    pr_agent/servers/gitea_app.py: E261,E302,E303,E305,E501,F541
+    pr_agent/servers/github_action_runner.py: E501
+    pr_agent/servers/github_app.py: E127,E128,E225,E231,E261,E302,E501,F401,F541,F841
+    pr_agent/servers/github_lambda_webhook.py: E722,W292
+    pr_agent/servers/github_polling.py: E127,E261,E302,E303,E501,F401,F541,F841
+    pr_agent/servers/gitlab_lambda_webhook.py: E722,W292
+    pr_agent/servers/gitlab_webhook.py: E261,E302,E501,F541,W293
+    pr_agent/servers/help.py: E111,E225,E303,E501,F541
+    pr_agent/tools/pr_add_docs.py: E127,E713,F541
+    pr_agent/tools/pr_code_suggestions.py: E125,E128,E261,E303,E501,E722,F401,F541,F841
+    pr_agent/tools/pr_config.py: E128,E231,E303,E501,F541
+    pr_agent/tools/pr_description.py: E261,E303,E501,E721,F401,F541,F841
+    pr_agent/tools/pr_generate_labels.py: E303,E721,F401
+    pr_agent/tools/pr_help_docs.py: E127,E128,E225,E227,E231,E252,E261,E262,E265,E275,E302,E501,F541,F841
+    pr_agent/tools/pr_help_message.py: E221,E225,E261,E302,E303,E501,F541,F841
+    pr_agent/tools/pr_line_questions.py: E128,E302,E303,E501,F401,W291,W293
+    pr_agent/tools/pr_questions.py: E128,E261,E303,E501,F541
+    pr_agent/tools/pr_reviewer.py: E128,E261,E501,E711,F401,F541
+    pr_agent/tools/pr_similar_issue.py: E127,E128,E303,E501,E713,E722,F401,F821,F841
+    pr_agent/tools/pr_update_changelog.py: E122,F401,F541,W293
+    pr_agent/tools/ticket_pr_compliance_check.py: E302,E501
+    tests/e2e_tests/e2e_utils.py: E501
+    tests/e2e_tests/langchain_ai_handler.py: E302,F541,W291,W292,W293
+    tests/e2e_tests/test_bitbucket_app.py: E225,E231,E261,E302,E303,F401,F541,F841
+    tests/e2e_tests/test_gitea_app.py: E302,E305,E722,F401,F541,W291,W292,W293
+    tests/e2e_tests/test_github_app.py: F541
+    tests/e2e_tests/test_gitlab_webhook.py: E261,E302,F401,F541
+    tests/health_test/main.py: E261,E501,F401,F541
+    tests/unittest/test_aws_secrets_manager_provider.py: F401,W291
+    tests/unittest/test_azure_devops_comment.py: W292
+    tests/unittest/test_azure_devops_parsing.py: W293,W391
+    tests/unittest/test_bitbucket_provider.py: E303,E501
+    tests/unittest/test_cli_config_branch.py: E501
+    tests/unittest/test_clip_tokens.py: E261,F401,W292
+    tests/unittest/test_codecommit_provider.py: E501,F401
+    tests/unittest/test_config_loader_secrets.py: W291,W293
+    tests/unittest/test_convert_to_markdown.py: E301,E303,E501
+    tests/unittest/test_extend_patch.py: E128,E225,E261,E302,E303,E501,W291,W292
+    tests/unittest/test_extract_issue_from_branch.py: F401
+    tests/unittest/test_fetching_sub_issues.py: E501
+    tests/unittest/test_file_filter.py: E501,W293,W605
+    tests/unittest/test_find_line_number_of_relevant_line_in_file.py: E261,E501
+    tests/unittest/test_gitea_provider.py: E261,E301,E303
+    tests/unittest/test_github_action_output.py: E261
+    tests/unittest/test_gitlab_provider.py: F401
+    tests/unittest/test_gitlab_webhook_port.py: E402
+    tests/unittest/test_handle_patch_deletions.py: F401
+    tests/unittest/test_ignore_repositories.py: E302,E305,W291,W292
+    tests/unittest/test_litellm_imds.py: E302
+    tests/unittest/test_litellm_reasoning_effort.py: E501,F401
+    tests/unittest/test_load_yaml.py: E122,E501
+    tests/unittest/test_mosaico_router.py: F401
+    tests/unittest/test_parse_code_suggestion.py: E301,E303
+    tests/unittest/test_pr_description.py: E302
+    tests/unittest/test_pr_update_changelog.py: E501,W291,W292,W293
+    tests/unittest/test_progress_comment.py: E501
+    tests/unittest/test_secret_provider_factory.py: E501,W291,W293
+    tests/unittest/test_skills_loader.py: E127
+    tests/unittest/test_ticket_extraction_async.py: E302
+    tests/unittest/test_try_fix_yaml.py: E301,E303,E501,F841
