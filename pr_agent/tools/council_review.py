@@ -76,6 +76,7 @@ class CouncilReviewConfig:
     enabled: bool
     members: list[CouncilModelConfig] = field(default_factory=list)
     chair: CouncilModelConfig | None = None
+    peer_evaluation: bool = True
     warnings: list[str] = field(default_factory=list)
 
 
@@ -87,6 +88,14 @@ class CouncilMemberReview:
     parsed: dict[str, Any]
     metadata: dict[str, Any]
     source_diff: str
+
+
+@dataclass(frozen=True)
+class CouncilPeerEvaluation:
+    evaluator_label: str
+    response: str
+    parsed: dict[str, Any]
+    metadata: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -126,9 +135,17 @@ def resolve_council_review_config() -> CouncilReviewConfig:
             for index, member in enumerate(section.get("members", []))
         ]
         chair = _parse_model_config(section.get("chair", {}), "chair")
+        peer_evaluation = section.get("peer_evaluation", True)
+        if not isinstance(peer_evaluation, bool):
+            raise ValueError("pr_council_review.peer_evaluation must be boolean")
         if not 2 <= len(members) <= 5:
             raise ValueError("pr_council_review.members must contain 2 to 5 entries")
-        return CouncilReviewConfig(enabled=True, members=members, chair=chair)
+        return CouncilReviewConfig(
+            enabled=True,
+            members=members,
+            chair=chair,
+            peer_evaluation=peer_evaluation,
+        )
     except (TypeError, ValueError) as exc:
         warning = f"Invalid pr_council_review configuration; falling back to Standard Review: {exc}"
         get_logger().warning(warning)
@@ -206,8 +223,25 @@ class CouncilReviewRunner:
         if len(successful_reviews) < 2:
             raise CouncilReviewError("Council Review failed because fewer than two members returned parseable reviews.")
 
+        peer_evaluations = []
+        failed_peer_evaluations = 0
+        if self.config.peer_evaluation:
+            peer_results = await asyncio.gather(
+                *(
+                    self._run_peer_evaluation(member, index, successful_reviews)
+                    for index, member in enumerate(self.config.members, start=1)
+                ),
+                return_exceptions=True,
+            )
+            for result in peer_results:
+                if isinstance(result, BaseException):
+                    failed_peer_evaluations += 1
+                    get_logger().warning("Council peer evaluation failed", artifact={"error": str(result)})
+                else:
+                    peer_evaluations.append(result)
+
         try:
-            chair_response, chair_metadata = await self._run_chair(successful_reviews)
+            chair_response, chair_metadata = await self._run_chair(successful_reviews, peer_evaluations)
         except Exception as exc:
             get_logger().warning("Council chair synthesis failed", artifact={"error": str(exc)})
             raise CouncilReviewError("Council Review failed during chair synthesis.") from exc
@@ -217,6 +251,9 @@ class CouncilReviewRunner:
             "member_count": len(self.config.members),
             "successful_member_count": len(successful_reviews),
             "failed_member_count": failed_members,
+            "peer_evaluation_enabled": self.config.peer_evaluation,
+            "successful_peer_evaluation_count": len(peer_evaluations),
+            "failed_peer_evaluation_count": failed_peer_evaluations,
             "chair_model": self.config.chair.model,
             "warnings": chair_metadata.get("warnings", []),
         }
@@ -245,7 +282,7 @@ class CouncilReviewRunner:
         )
         parsed = _parse_review_prediction(result.response, variables)
         return CouncilMemberReview(
-            label=f"member_{index}",
+            label=f"response_{index}",
             model=member.model,
             response=result.response,
             parsed=parsed,
@@ -253,11 +290,47 @@ class CouncilReviewRunner:
             source_diff=patches_diff,
         )
 
-    async def _run_chair(self, member_reviews: list[CouncilMemberReview]) -> tuple[str, dict[str, Any]]:
+    async def _run_peer_evaluation(
+        self,
+        member: CouncilModelConfig,
+        index: int,
+        member_reviews: list[CouncilMemberReview],
+    ) -> CouncilPeerEvaluation:
         variables = copy.deepcopy(self.vars)
         variables.update({
             "member_reviews": _format_member_reviews(member_reviews),
             "member_review_count": len(member_reviews),
+        })
+        variables.pop("diff", None)
+        system_prompt = _render_prompt(get_settings().pr_council_review_prompt.peer_system, variables)
+        user_prompt = _render_prompt(get_settings().pr_council_review_prompt.peer_user, variables)
+        result = await self.ai_handler.chat_completion_with_metadata(
+            model=member.model,
+            system=system_prompt,
+            user=user_prompt,
+            inference_settings=member.inference_settings,
+        )
+        return CouncilPeerEvaluation(
+            evaluator_label=f"evaluator_{index}",
+            response=result.response,
+            parsed=_parse_peer_evaluation(
+                result.response,
+                expected_labels=[review.label for review in member_reviews],
+            ),
+            metadata=result.metadata,
+        )
+
+    async def _run_chair(
+        self,
+        member_reviews: list[CouncilMemberReview],
+        peer_evaluations: list[CouncilPeerEvaluation],
+    ) -> tuple[str, dict[str, Any]]:
+        variables = copy.deepcopy(self.vars)
+        variables.update({
+            "member_reviews": _format_member_reviews(member_reviews),
+            "member_review_count": len(member_reviews),
+            "peer_evaluations": _format_peer_evaluations(peer_evaluations),
+            "peer_evaluation_count": len(peer_evaluations),
         })
         variables.pop("diff", None)
         system_prompt = _render_prompt(get_settings().pr_council_review_prompt.system, variables)
@@ -411,13 +484,46 @@ def _validate_dict(value: Any, schema: dict[str, type], location: str) -> dict[s
     return normalized
 
 
+def _parse_peer_evaluation(response: str, expected_labels: list[str]) -> dict[str, Any]:
+    try:
+        data = yaml.safe_load(response.strip())
+    except yaml.YAMLError as exc:
+        raise CouncilReviewError("Council peer evaluator returned an unparseable result") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("peer_evaluation"), dict):
+        raise CouncilReviewError("Council peer evaluator returned an unparseable result")
+
+    evaluation = data["peer_evaluation"]
+    ranking = evaluation.get("ranking")
+    rationale = evaluation.get("rationale")
+    if (
+        not isinstance(ranking, list)
+        or not all(isinstance(label, str) for label in ranking)
+        or len(ranking) != len(expected_labels)
+        or set(ranking) != set(expected_labels)
+    ):
+        raise CouncilReviewError("Council peer evaluator returned an invalid ranking")
+    if not isinstance(rationale, str):
+        raise CouncilReviewError("Council peer evaluator returned an invalid rationale")
+    return {"peer_evaluation": {"ranking": ranking, "rationale": rationale}}
+
+
 def _format_member_reviews(member_reviews: list[CouncilMemberReview]) -> str:
     rendered_reviews = []
-    for index, review in enumerate(member_reviews, start=1):
+    for review in member_reviews:
         redacted_review = _redact_review_data(review.parsed, review.source_diff)
         normalized_review = yaml.safe_dump(redacted_review, sort_keys=False)
-        rendered_reviews.append(f"Member Review {index}:\n```yaml\n{normalized_review.strip()}\n```")
+        rendered_reviews.append(f"{review.label}:\n```yaml\n{normalized_review.strip()}\n```")
     return "\n\n".join(rendered_reviews)
+
+
+def _format_peer_evaluations(peer_evaluations: list[CouncilPeerEvaluation]) -> str:
+    rendered_evaluations = []
+    for evaluation in peer_evaluations:
+        normalized_evaluation = yaml.safe_dump(evaluation.parsed, sort_keys=False)
+        rendered_evaluations.append(
+            f"{evaluation.evaluator_label}:\n```yaml\n{normalized_evaluation.strip()}\n```"
+        )
+    return "\n\n".join(rendered_evaluations)
 
 
 def _redact_review_data(value: Any, source_diff: str) -> Any:

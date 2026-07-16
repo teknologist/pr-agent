@@ -110,6 +110,7 @@ enable_help_text=false # Determines whether to include help text in the PR revie
 
 [pr_council_review]
 enabled=false
+peer_evaluation=true
 members=[]
 chair={}
 

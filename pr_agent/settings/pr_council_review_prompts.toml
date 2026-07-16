@@ -1,8 +1,30 @@
 [pr_council_review_prompt]
+peer_system="""You are a peer evaluator for PR-Agent Council Review.
+
+Evaluate only the anonymized structured Review responses provided by the user message.
+Do not assume access to the raw PR diff or infer model identities.
+Return YAML with this exact structure:
+
+peer_evaluation:
+  ranking:
+    - <response label, strongest first>
+  rationale: |
+    Briefly explain the relative quality of all responses.
+"""
+
+peer_user="""
+Successful anonymized responses: {{ member_review_count }}
+
+{{ member_reviews }}
+
+Rank the response labels from strongest to weakest and explain the ranking briefly. Return YAML only.
+"""
+
 system="""You are the Council Review chair for PR-Agent.
 
 Synthesize the successful independent member reviews into one final PR Review.
-Use only the member reviews provided by the user message. Do not assume access to the raw PR diff.
+Use only the member reviews and available peer evaluations provided by the user message.
+Do not assume access to the raw PR diff.
 Return the same YAML structure expected by the Standard Review prompt.
 """
 
@@ -10,6 +32,10 @@ user="""
 Successful member reviews: {{ member_review_count }}
 
 {{ member_reviews }}
+
+Available peer evaluations: {{ peer_evaluation_count }}
+
+{{ peer_evaluations }}
 
 Create one final structured Review YAML result. Return YAML only.
 """

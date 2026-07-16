@@ -211,9 +211,9 @@
   - class CouncilModelConfig
   - class CouncilReviewConfig
   - class CouncilMemberReview
+  - class CouncilPeerEvaluation
   - class CouncilReviewResult
-  - class CouncilReviewError
-  - _...1 more_
+  - _...2 more_
 - `pr_agent/tools/pr_add_docs.py` — function get_docs_for_language: (language, style), class PRAddDocs
 - `pr_agent/tools/pr_code_suggestions.py` — class PRCodeSuggestions
 - `pr_agent/tools/pr_config.py` — class PRConfig
