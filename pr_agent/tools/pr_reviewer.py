@@ -30,6 +30,10 @@ from pr_agent.tools.council_review import (
 from pr_agent.tools.ticket_pr_compliance_check import (
     extract_and_cache_pr_tickets, extract_tickets)
 
+_COUNCIL_ATTRIBUTION = "**Council Review**: synthesized from independent member reviews."
+_INVALID_CONFIG_NOTICE = "**Council Review notice**: Invalid Council Review configuration; Standard Review was used."
+_UNSUPPORTED_OVERRIDE_NOTICE = "**Council Review notice**: An unsupported inference override was ignored."
+
 
 class PRReviewer:
     """
@@ -187,7 +191,11 @@ class PRReviewer:
                         self.git_provider.publish_comment(e.public_message)
                     return None
             else:
-                self.council_review_metadata = {"warnings": council_config.warnings if council_config else []}
+                config_warnings = council_config.warnings if council_config else []
+                self.council_review_metadata = {
+                    "warnings": config_warnings,
+                    "standard_review_fallback": bool(config_warnings),
+                }
                 await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
 
             if not self.prediction:
@@ -204,6 +212,10 @@ class PRReviewer:
                     reason += ": no major issues detected."
                 get_logger().info(reason)
                 get_settings().data = {"artifact": pr_review}
+                if get_settings().config.publish_output:
+                    for notice in self._get_council_review_notices():
+                        self.git_provider.publish_comment(notice)
+                    self.git_provider.remove_initial_comment()
                 return
 
             # publish the review
@@ -298,12 +310,12 @@ class PRReviewer:
                                                files=self.git_provider.get_diff_files())
 
         council_metadata = getattr(self, "council_review_metadata", {})
+        council_context = self._get_council_review_notices()
         if council_metadata.get("strategy") == "council_review":
-            markdown_text = (
-                "**Council Review**: synthesized from "
-                f"{council_metadata.get('successful_member_count', 0)} independent member reviews.\n\n"
-                f"{markdown_text}"
-            )
+            council_context.insert(0, _COUNCIL_ATTRIBUTION)
+        if council_context:
+            council_context_text = "\n\n".join(council_context)
+            markdown_text = f"{council_context_text}\n\n{markdown_text}"
 
         # Add help text if gfm_markdown is supported
         if self.git_provider.is_supported("gfm_markdown") and get_settings().pr_reviewer.enable_help_text:
@@ -322,6 +334,18 @@ class PRReviewer:
             markdown_text = ""
 
         return markdown_text
+
+    def _get_council_review_notices(self) -> list[str]:
+        metadata = getattr(self, "council_review_metadata", {})
+        notices = []
+        if metadata.get("standard_review_fallback"):
+            notices.append(_INVALID_CONFIG_NOTICE)
+        if any(
+            isinstance(warning, dict) and warning.get("code") == "unsupported_inference_setting"
+            for warning in (metadata.get("warnings") or [])
+        ):
+            notices.append(_UNSUPPORTED_OVERRIDE_NOTICE)
+        return notices
 
     def _get_user_answers(self) -> Tuple[str, str]:
         """
