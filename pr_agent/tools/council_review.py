@@ -15,7 +15,7 @@ from pr_agent.algo.ai_handlers.base_ai_handler import (
     ModelInferenceSettings,
     UNSET,
 )
-from pr_agent.algo.pr_processing import get_pr_diff
+from pr_agent.algo.pr_processing import _get_all_deployments, get_pr_diff
 from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.utils import load_yaml
 from pr_agent.config_loader import get_settings
@@ -243,11 +243,51 @@ class CouncilReviewRunner:
                 else:
                     peer_evaluations.append(result)
 
+        chair_response = None
+        chair_metadata = {}
+        chair_model = None
+        chair_models = [self.config.chair.model, *_get_fallback_models()]
+        original_deployment_id = get_settings().get("openai.deployment_id", None)
         try:
-            chair_response, chair_metadata = await self._run_chair(successful_reviews, peer_evaluations)
+            chair_attempts = zip(chair_models, _get_all_deployments(chair_models))
+            for model, deployment_id in chair_attempts:
+                try:
+                    get_settings().set("openai.deployment_id", deployment_id)
+                    chair_response, chair_metadata = await self._run_chair(
+                        model,
+                        successful_reviews,
+                        peer_evaluations,
+                    )
+                    chair_model = model
+                    break
+                except Exception:
+                    get_logger().warning(
+                        "Council chair synthesis failed",
+                        artifact={"model": model},
+                    )
         except Exception as exc:
-            get_logger().warning("Council chair synthesis failed")
+            get_logger().warning("Council chair fallback configuration failed")
             raise CouncilReviewError("Council Review failed during chair synthesis.") from exc
+        finally:
+            get_settings().set("openai.deployment_id", original_deployment_id)
+
+        synthesis_strategy = "chair"
+        if chair_response is None:
+            member_fallback = _select_member_fallback(successful_reviews, peer_evaluations)
+            if member_fallback is None:
+                raise CouncilReviewError("Council Review failed during chair synthesis.")
+            chair_response = yaml.safe_dump(member_fallback.parsed, sort_keys=False)
+            chair_model = None
+            synthesis_strategy = "member_fallback"
+
+        if chair_model == self.config.chair.model:
+            chair_fallback_decision = "not_used"
+        elif chair_model is not None:
+            chair_fallback_decision = "used"
+        elif len(chair_models) > 1:
+            chair_fallback_decision = "exhausted"
+        else:
+            chair_fallback_decision = "not_configured"
 
         metadata = {
             "strategy": "council_review",
@@ -258,11 +298,12 @@ class CouncilReviewRunner:
             "peer_evaluation_enabled": self.config.peer_evaluation,
             "successful_peer_evaluation_count": len(peer_evaluations),
             "failed_peer_evaluation_count": failed_peer_evaluations,
-            "chair_model": self.config.chair.model,
+            "chair_model": chair_model,
+            "synthesis_strategy": synthesis_strategy,
             "fallback_decisions": {
                 "standard_review": "not_used",
-                "chair_fallback": "not_used",
-                "member_fallback": "not_used",
+                "chair_fallback": chair_fallback_decision,
+                "member_fallback": "used" if synthesis_strategy == "member_fallback" else "not_used",
             },
             "calls": list(self.call_metadata),
             "warnings": chair_metadata.get("warnings", []),
@@ -333,6 +374,7 @@ class CouncilReviewRunner:
 
     async def _run_chair(
         self,
+        model: str,
         member_reviews: list[CouncilMemberReview],
         peer_evaluations: list[CouncilPeerEvaluation],
     ) -> tuple[str, dict[str, Any]]:
@@ -346,10 +388,11 @@ class CouncilReviewRunner:
         variables.pop("diff", None)
         system_prompt = _render_prompt(get_settings().pr_council_review_prompt.system, variables)
         user_prompt = _render_prompt(get_settings().pr_council_review_prompt.user, variables)
+        participant = CouncilModelConfig(model=model, inference_settings=self.config.chair.inference_settings)
         result, parsed = await self._complete_call(
             stage="chair_synthesis",
             role="chair",
-            participant=self.config.chair,
+            participant=participant,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             parse_response=lambda response: _parse_review_prediction(response, variables),
@@ -383,6 +426,7 @@ class CouncilReviewRunner:
     ) -> tuple[Any, Any]:
         started_at = asyncio.get_running_loop().time()
         result = None
+        token_usage = None
         try:
             result = await asyncio.wait_for(
                 self.ai_handler.chat_completion_with_metadata(
@@ -393,18 +437,19 @@ class CouncilReviewRunner:
                 ),
                 timeout=get_settings().config.ai_timeout,
             )
+            result_metadata = result.metadata or {}
+            token_usage = result_metadata.get("token_usage", result_metadata.get("usage"))
             parsed = parse_response(result.response)
         except asyncio.TimeoutError:
-            self._record_call(stage, role, participant.model, started_at, "timeout")
+            self._record_call(stage, role, participant.model, started_at, "timeout", token_usage)
             raise
         except asyncio.CancelledError:
-            self._record_call(stage, role, participant.model, started_at, "cancelled")
+            self._record_call(stage, role, participant.model, started_at, "cancelled", token_usage)
             raise
         except BaseException:
-            self._record_call(stage, role, participant.model, started_at, "failure")
+            self._record_call(stage, role, participant.model, started_at, "failure", token_usage)
             raise
 
-        token_usage = result.metadata.get("token_usage", result.metadata.get("usage"))
         self._record_call(stage, role, participant.model, started_at, "success", token_usage)
         return result, parsed
 
@@ -435,6 +480,31 @@ class CouncilReviewRunner:
         handler.main_pr_language = self.main_language
         handler.suppress_raw_logging = True
         return handler
+
+
+def _get_fallback_models() -> list[str]:
+    fallback_models = get_settings().config.fallback_models
+    if isinstance(fallback_models, str):
+        fallback_models = fallback_models.split(",")
+    return [model.strip() for model in fallback_models if isinstance(model, str) and model.strip()]
+
+
+def _select_member_fallback(
+    member_reviews: list[CouncilMemberReview],
+    peer_evaluations: list[CouncilPeerEvaluation],
+) -> CouncilMemberReview | None:
+    if len(peer_evaluations) < 2:
+        return None
+
+    scores = {review.label: 0 for review in member_reviews}
+    for evaluation in peer_evaluations:
+        ranking = evaluation.parsed["peer_evaluation"]["ranking"]
+        if len(ranking) != len(scores) or set(ranking) != set(scores):
+            return None
+        for points, label in enumerate(reversed(ranking)):
+            scores[label] += points
+
+    return max(member_reviews, key=lambda review: scores[review.label], default=None)
 
 
 def _render_prompt(template: str, variables: dict[str, Any]) -> str:
