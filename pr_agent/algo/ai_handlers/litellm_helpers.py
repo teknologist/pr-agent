@@ -14,13 +14,17 @@ async def _handle_streaming_response(response, suppress_raw_logging=False):
         response: The streaming response object from acompletion
 
     Returns:
-        tuple: (full_response_content, finish_reason)
+        tuple: (full_response_content, finish_reason, usage)
     """
     full_response = ""
     finish_reason = None
+    usage = None
 
     try:
         async for chunk in response:
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage = chunk_usage
             if chunk.choices and len(chunk.choices) > 0:
                 choice = chunk.choices[0]
                 delta = choice.delta
@@ -42,13 +46,14 @@ async def _handle_streaming_response(response, suppress_raw_logging=False):
     elif not full_response and finish_reason:
         get_logger().debug(f"Streaming response resulted in empty content but completed with finish_reason: {finish_reason}")
         raise openai.APIError(f"Streaming response completed with finish_reason '{finish_reason}' but no content received")
-    return full_response, finish_reason
+    return full_response, finish_reason, usage
 
 
 class MockResponse:
     """Mock response object for streaming models to enable consistent logging."""
 
-    def __init__(self, resp, finish_reason):
+    def __init__(self, resp, finish_reason, usage=None):
+        self.usage = usage
         self._data = {
             "choices": [
                 {
