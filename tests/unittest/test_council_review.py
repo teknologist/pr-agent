@@ -450,6 +450,44 @@ def test_peer_evaluation_failures_are_best_effort(
     assert chair_call["user"].count("evaluator_") == successful_count
 
 
+@pytest.mark.parametrize(
+    "ranking",
+    [
+        ["response_1"],
+        ["response_1", "response_1"],
+        ["response_1", "unknown_response"],
+    ],
+)
+def test_semantically_malformed_peer_rankings_are_best_effort(
+    monkeypatch,
+    council_settings,
+    ranking,
+):
+    config = _peer_enabled_config(council_settings)
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    malformed_evaluation = yaml.safe_dump({
+        "peer_evaluation": {
+            "ranking": ranking,
+            "rationale": "Malformed ranking must not reach the chair.",
+        }
+    })
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": _VALID_REVIEW,
+        "member-a:peer": malformed_evaluation,
+        "member-b:peer": _VALID_PEER_EVALUATION,
+        "chair": _VALID_REVIEW,
+    })
+
+    result = asyncio.run(_runner(config).run())
+
+    chair_call = [call for call in FakeAiHandler.calls if call["stage"] == "chair"][0]
+    assert result.metadata["successful_peer_evaluation_count"] == 1
+    assert result.metadata["failed_peer_evaluation_count"] == 1
+    assert "evaluator_1" not in chair_call["user"]
+    assert "evaluator_2" in chair_call["user"]
+
+
 def test_member_and_peer_calls_do_not_use_global_fallback_models(monkeypatch, council_settings):
     original_fallback_models = copy.deepcopy(council_settings.config.fallback_models)
     council_settings.config.fallback_models = ["fallback-model"]

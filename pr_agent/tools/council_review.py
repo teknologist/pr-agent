@@ -313,7 +313,10 @@ class CouncilReviewRunner:
         return CouncilPeerEvaluation(
             evaluator_label=f"evaluator_{index}",
             response=result.response,
-            parsed=_parse_peer_evaluation(result.response),
+            parsed=_parse_peer_evaluation(
+                result.response,
+                expected_labels=[review.label for review in member_reviews],
+            ),
             metadata=result.metadata,
         )
 
@@ -481,7 +484,7 @@ def _validate_dict(value: Any, schema: dict[str, type], location: str) -> dict[s
     return normalized
 
 
-def _parse_peer_evaluation(response: str) -> dict[str, Any]:
+def _parse_peer_evaluation(response: str, expected_labels: list[str]) -> dict[str, Any]:
     try:
         data = yaml.safe_load(response.strip())
     except yaml.YAMLError as exc:
@@ -492,7 +495,12 @@ def _parse_peer_evaluation(response: str) -> dict[str, Any]:
     evaluation = data["peer_evaluation"]
     ranking = evaluation.get("ranking")
     rationale = evaluation.get("rationale")
-    if not isinstance(ranking, list) or not all(isinstance(label, str) for label in ranking):
+    if (
+        not isinstance(ranking, list)
+        or not all(isinstance(label, str) for label in ranking)
+        or len(ranking) != len(expected_labels)
+        or set(ranking) != set(expected_labels)
+    ):
         raise CouncilReviewError("Council peer evaluator returned an invalid ranking")
     if not isinstance(rationale, str):
         raise CouncilReviewError("Council peer evaluator returned an invalid rationale")
