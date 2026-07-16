@@ -244,6 +244,7 @@ class CouncilReviewRunner:
         chair_metadata = {}
         chair_model = None
         chair_models = [self.config.chair.model, *_get_fallback_models()]
+        original_deployment_id = get_settings().get("openai.deployment_id", None)
         try:
             chair_attempts = zip(chair_models, _get_all_deployments(chair_models))
             for model, deployment_id in chair_attempts:
@@ -264,6 +265,8 @@ class CouncilReviewRunner:
         except Exception as exc:
             get_logger().warning("Council chair fallback configuration failed", artifact={"error": str(exc)})
             raise CouncilReviewError("Council Review failed during chair synthesis.") from exc
+        finally:
+            get_settings().set("openai.deployment_id", original_deployment_id)
 
         synthesis_strategy = "chair"
         if chair_response is None:

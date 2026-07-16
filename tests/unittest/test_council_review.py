@@ -801,6 +801,7 @@ def test_chair_fallbacks_are_attempted_in_order_with_chair_inference_settings(mo
 
     try:
         result = asyncio.run(_runner(config).run())
+        assert council_settings.get("openai.deployment_id", None) == "chair-deployment"
     finally:
         council_settings.config.fallback_models = original_fallback_models
         council_settings.set("openai.deployment_id", original_deployment_id)
