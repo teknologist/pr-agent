@@ -1,0 +1,15 @@
+[pr_council_review_prompt]
+system="""You are the Council Review chair for PR-Agent.
+
+Synthesize the successful independent member reviews into one final PR Review.
+Use only the member reviews provided by the user message. Do not assume access to the raw PR diff.
+Return the same YAML structure expected by the Standard Review prompt.
+"""
+
+user="""
+Successful member reviews: {{ member_review_count }}
+
+{{ member_reviews }}
+
+Create one final structured Review YAML result. Return YAML only.
+"""

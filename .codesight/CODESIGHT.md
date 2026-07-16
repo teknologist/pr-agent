@@ -2,9 +2,9 @@
 
 > **Stack:** fastapi | none | unknown | python
 
-> 10 routes | 0 models | 0 components | 79 lib files | 45 env vars | 4 middleware | 20% test coverage
-> **Token savings:** this file is ~6,600 tokens. Without it, AI exploration would cost ~39,600 tokens. **Saves ~33,000 tokens per conversation.**
-> **Last scanned:** 2026-07-16 12:47 — re-run after significant changes
+> 10 routes | 0 models | 0 components | 80 lib files | 45 env vars | 4 middleware | 20% test coverage
+> **Token savings:** this file is ~6,700 tokens. Without it, AI exploration would cost ~39,800 tokens. **Saves ~33,200 tokens per conversation.**
+> **Last scanned:** 2026-07-16 13:43 — re-run after significant changes
 
 ---
 
@@ -231,6 +231,14 @@
   - function verify_signature: (payload_body, secret_token, signature_header)
   - class RateLimitExceeded
   - class DefaultDictWithTimeout
+- `pr_agent/tools/council_review.py`
+  - function resolve_council_review_config: () -> CouncilReviewConfig
+  - class CouncilModelConfig
+  - class CouncilReviewConfig
+  - class CouncilMemberReview
+  - class CouncilReviewResult
+  - class CouncilReviewError
+  - _...1 more_
 - `pr_agent/tools/pr_add_docs.py` — function get_docs_for_language: (language, style), class PRAddDocs
 - `pr_agent/tools/pr_code_suggestions.py` — class PRCodeSuggestions
 - `pr_agent/tools/pr_config.py` — class PRConfig
@@ -375,7 +383,7 @@
 # Test Coverage
 
 > **20%** of routes and models are covered by tests
-> 98 test files found
+> 99 test files found
 
 ## Covered Routes
 

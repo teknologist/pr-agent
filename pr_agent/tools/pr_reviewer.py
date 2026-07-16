@@ -25,6 +25,8 @@ from pr_agent.git_providers.git_provider import (IncrementalPR,
                                                  get_main_pr_language)
 from pr_agent.log import get_logger
 from pr_agent.servers.help import HelpMessage
+from pr_agent.tools.council_review import (
+    CouncilReviewError, CouncilReviewRunner, resolve_council_review_config)
 from pr_agent.tools.ticket_pr_compliance_check import (
     extract_and_cache_pr_tickets, extract_tickets)
 
@@ -61,6 +63,7 @@ class PRReviewer:
 
         if self.is_answer and not self.git_provider.is_supported("get_issue_comments"):
             raise Exception(f"Answer mode is not supported for {get_settings().config.git_provider} for now")
+        self.ai_handler_factory = ai_handler
         self.ai_handler = ai_handler()
         self.ai_handler.main_pr_language = self.main_language
         self.patches_diff = None
@@ -163,7 +166,30 @@ class PRReviewer:
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
                 self.git_provider.publish_comment("Preparing review...", is_temporary=True)
 
-            await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
+            council_config = resolve_council_review_config()
+            self.council_review_metadata = {}
+            if council_config.enabled:
+                try:
+                    council_result = await CouncilReviewRunner(
+                        config=council_config,
+                        git_provider=self.git_provider,
+                        token_handler=self.token_handler,
+                        vars=self.vars,
+                        ai_handler_factory=self.ai_handler_factory,
+                        main_language=self.main_language,
+                    ).run()
+                    self.prediction = council_result.prediction
+                    self.council_review_metadata = council_result.metadata
+                except CouncilReviewError as e:
+                    get_logger().warning(f"Council Review failed without Standard Review fallback: {e}")
+                    self.git_provider.remove_initial_comment()
+                    if get_settings().config.publish_output:
+                        self.git_provider.publish_comment(e.public_message)
+                    return None
+            else:
+                self.council_review_metadata = {"warnings": council_config.warnings}
+                await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
+
             if not self.prediction:
                 self.git_provider.remove_initial_comment()
                 return None
@@ -270,6 +296,14 @@ class PRReviewer:
                                             incremental_review_markdown_text,
                                                git_provider=self.git_provider,
                                                files=self.git_provider.get_diff_files())
+
+        council_metadata = getattr(self, "council_review_metadata", {})
+        if council_metadata.get("strategy") == "council_review":
+            markdown_text = (
+                "**Council Review**: synthesized from "
+                f"{council_metadata.get('successful_member_count', 0)} independent member reviews.\n\n"
+                f"{markdown_text}"
+            )
 
         # Add help text if gfm_markdown is supported
         if self.git_provider.is_supported("gfm_markdown") and get_settings().pr_reviewer.enable_help_text:

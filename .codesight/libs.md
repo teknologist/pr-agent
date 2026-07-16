@@ -206,6 +206,14 @@
   - function verify_signature: (payload_body, secret_token, signature_header)
   - class RateLimitExceeded
   - class DefaultDictWithTimeout
+- `pr_agent/tools/council_review.py`
+  - function resolve_council_review_config: () -> CouncilReviewConfig
+  - class CouncilModelConfig
+  - class CouncilReviewConfig
+  - class CouncilMemberReview
+  - class CouncilReviewResult
+  - class CouncilReviewError
+  - _...1 more_
 - `pr_agent/tools/pr_add_docs.py` — function get_docs_for_language: (language, style), class PRAddDocs
 - `pr_agent/tools/pr_code_suggestions.py` — class PRCodeSuggestions
 - `pr_agent/tools/pr_config.py` — class PRConfig
