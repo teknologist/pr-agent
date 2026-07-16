@@ -6,7 +6,7 @@ from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 
 
-async def _handle_streaming_response(response):
+async def _handle_streaming_response(response, suppress_raw_logging=False):
     """
     Handle streaming response from acompletion and collect the full response.
 
@@ -30,7 +30,10 @@ async def _handle_streaming_response(response):
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
     except Exception as e:
-        get_logger().error(f"Error handling streaming response: {e}")
+        if suppress_raw_logging:
+            get_logger().error("Error handling streaming response")
+        else:
+            get_logger().error(f"Error handling streaming response: {e}")
         raise
 
     if not full_response and finish_reason is None:

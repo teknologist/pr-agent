@@ -285,13 +285,76 @@ def _reset_fake_handler(responses_by_model):
     FakeAiHandler.instances = 0
 
 
-def _runner(config, git_provider=None):
+class LifecycleAiHandler:
+    plans = {}
+    events = []
+    active_calls = 0
+    max_active_calls = 0
+    cancelled_calls = 0
+
+    def __init__(self):
+        self.main_pr_language = None
+
+    @property
+    def deployment_id(self):
+        return None
+
+    async def chat_completion_with_metadata(
+        self,
+        model,
+        system,
+        user,
+        temperature=None,
+        img_path=None,
+        inference_settings=None,
+    ):
+        stage = "peer" if system == "peer system" else "chair" if system == "chair system" else "member"
+        key = f"{model}:{stage}"
+        delay, response = self.plans[key]
+        self.events.append(("start", key))
+        type(self).active_calls += 1
+        type(self).max_active_calls = max(type(self).max_active_calls, type(self).active_calls)
+        try:
+            await asyncio.sleep(delay)
+            if isinstance(response, BaseException):
+                raise response
+            self.events.append(("finish", key))
+            return SimpleNamespace(
+                response=response,
+                finish_reason="stop",
+                metadata={"token_usage": {"total_tokens": 17}, "warnings": []},
+            )
+        except asyncio.CancelledError:
+            type(self).cancelled_calls += 1
+            self.events.append(("cancel", key))
+            raise
+        finally:
+            type(self).active_calls -= 1
+
+
+def _reset_lifecycle_handler(plans):
+    LifecycleAiHandler.plans = plans
+    LifecycleAiHandler.events = []
+    LifecycleAiHandler.active_calls = 0
+    LifecycleAiHandler.max_active_calls = 0
+    LifecycleAiHandler.cancelled_calls = 0
+
+
+async def _wait_for_lifecycle_event(expected_event):
+    async def wait_for_event():
+        while expected_event not in LifecycleAiHandler.events:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_event(), timeout=1)
+
+
+def _runner(config, git_provider=None, ai_handler_factory=FakeAiHandler):
     return CouncilReviewRunner(
         config=config,
         git_provider=git_provider or SimpleNamespace(),
         token_handler=SimpleNamespace(),
         vars=_base_vars(),
-        ai_handler_factory=FakeAiHandler,
+        ai_handler_factory=ai_handler_factory,
         main_language="Python",
     )
 
@@ -655,6 +718,149 @@ def test_structurally_invalid_member_does_not_count_toward_quorum(monkeypatch, c
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b"]
 
 
+@pytest.mark.asyncio
+async def test_member_stage_waits_for_slow_failure_before_starting_chair(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}, {"model": "member-c"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_lifecycle_handler({
+        "member-a:member": (0.01, _VALID_REVIEW),
+        "member-b:member": (0.03, RuntimeError("late failure")),
+        "member-c:member": (0.02, _VALID_REVIEW),
+        "chair:chair": (0, _VALID_REVIEW),
+    })
+
+    result = await _runner(config, ai_handler_factory=LifecycleAiHandler).run()
+
+    assert LifecycleAiHandler.events.index(("start", "chair:chair")) > LifecycleAiHandler.events.index(
+        ("finish", "member-c:member")
+    )
+    assert result.metadata["quorum"] == {"required": 2, "successful": 2, "met": True}
+    assert [call["outcome"] for call in result.metadata["calls"][:3]].count("failure") == 1
+    assert result.metadata["calls"][0]["token_usage"] == {"total_tokens": 17}
+
+
+@pytest.mark.asyncio
+async def test_member_timeout_is_recorded_and_stage_settles(monkeypatch, council_settings):
+    original_timeout = council_settings.config.ai_timeout
+    council_settings.config.ai_timeout = 0.01
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}, {"model": "member-c"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_lifecycle_handler({
+        "member-a:member": (0, _VALID_REVIEW),
+        "member-b:member": (10, _VALID_REVIEW),
+        "member-c:member": (0, _VALID_REVIEW),
+        "chair:chair": (0, _VALID_REVIEW),
+    })
+
+    try:
+        result = await _runner(config, ai_handler_factory=LifecycleAiHandler).run()
+    finally:
+        council_settings.config.ai_timeout = original_timeout
+
+    member_b = next(call for call in result.metadata["calls"] if call["model"] == "member-b")
+    assert member_b["outcome"] == "timeout"
+    assert LifecycleAiHandler.cancelled_calls == 1
+    assert LifecycleAiHandler.active_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_review_cancellation_cancels_all_outstanding_member_tasks(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": f"member-{index}"} for index in range(5)],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_lifecycle_handler({
+        **{f"member-{index}:member": (10, _VALID_REVIEW) for index in range(5)},
+        "chair:chair": (0, _VALID_REVIEW),
+    })
+    task = asyncio.create_task(_runner(config, ai_handler_factory=LifecycleAiHandler).run())
+    await _wait_for_lifecycle_event(("start", "member-4:member"))
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert LifecycleAiHandler.cancelled_calls == 5
+    assert LifecycleAiHandler.active_calls == 0
+    assert ("start", "chair:chair") not in LifecycleAiHandler.events
+
+
+@pytest.mark.asyncio
+async def test_review_cancellation_cancels_all_outstanding_peer_tasks(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": True,
+        "members": [{"model": f"member-{index}"} for index in range(5)],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    peer_evaluation = yaml.safe_dump({
+        "peer_evaluation": {
+            "ranking": [f"response_{index}" for index in range(1, 6)],
+            "rationale": "Complete ranking.",
+        }
+    })
+    _reset_lifecycle_handler({
+        **{f"member-{index}:member": (0, _VALID_REVIEW) for index in range(5)},
+        **{f"member-{index}:peer": (10, peer_evaluation) for index in range(5)},
+        "chair:chair": (0, _VALID_REVIEW),
+    })
+    task = asyncio.create_task(_runner(config, ai_handler_factory=LifecycleAiHandler).run())
+    await _wait_for_lifecycle_event(("start", "member-4:peer"))
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    peer_cancellations = [event for event in LifecycleAiHandler.events if event[0] == "cancel"]
+    assert len(peer_cancellations) == 5
+    assert LifecycleAiHandler.active_calls == 0
+    assert ("start", "chair:chair") not in LifecycleAiHandler.events
+
+
+@pytest.mark.asyncio
+async def test_review_cancellation_cancels_outstanding_chair_task(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_lifecycle_handler({
+        "member-a:member": (0, _VALID_REVIEW),
+        "member-b:member": (0, _VALID_REVIEW),
+        "chair:chair": (10, _VALID_REVIEW),
+    })
+    task = asyncio.create_task(_runner(config, ai_handler_factory=LifecycleAiHandler).run())
+    await _wait_for_lifecycle_event(("start", "chair:chair"))
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert LifecycleAiHandler.cancelled_calls == 1
+    assert LifecycleAiHandler.active_calls == 0
+
+
 def test_cancelled_member_is_a_failed_result_and_does_not_corrupt_quorum(monkeypatch, council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
@@ -676,6 +882,69 @@ def test_cancelled_member_is_a_failed_result_and_does_not_corrupt_quorum(monkeyp
     assert result.metadata["successful_member_count"] == 2
     assert result.metadata["failed_member_count"] == 1
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b", "member-c", "chair"]
+
+
+def test_peer_enabled_five_member_run_never_exceeds_hard_cap(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": True,
+        "members": [{"model": f"member-{index}"} for index in range(5)],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    five_member_peer_evaluation = yaml.safe_dump({
+        "peer_evaluation": {
+            "ranking": [f"response_{index}" for index in range(1, 6)],
+            "rationale": "Complete ranking.",
+        }
+    })
+    _reset_lifecycle_handler({
+        **{f"member-{index}:member": (0.01, _VALID_REVIEW) for index in range(5)},
+        **{f"member-{index}:peer": (0.01, five_member_peer_evaluation) for index in range(5)},
+        "chair:chair": (0, _VALID_REVIEW),
+    })
+
+    result = asyncio.run(_runner(config, ai_handler_factory=LifecycleAiHandler).run())
+
+    assert result.metadata["member_count"] == 5
+    assert LifecycleAiHandler.max_active_calls == 5
+
+
+def test_council_logs_and_metadata_exclude_raw_outputs(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}, {"model": "member-c"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw prompt")
+    logger = MagicMock()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_logger", lambda: logger)
+    secret = "raw member peer ranking prompt chair output"
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": RuntimeError(secret),
+        "member-c": _VALID_REVIEW,
+        "chair": _VALID_REVIEW,
+    })
+
+    result = asyncio.run(_runner(config).run())
+
+    assert secret not in repr(logger.mock_calls)
+    assert secret not in repr(result.metadata)
+    assert all(
+        "response" not in call and "prompt" not in call and "ranking" not in call
+        for call in result.metadata["calls"]
+    )
+    assert result.metadata["fallback_decisions"] == {
+        "standard_review": "not_used",
+        "chair_fallback": "not_used",
+        "member_fallback": "not_used",
+    }
+    assert all({"strategy", "stage", "role", "model", "duration_ms", "outcome"} <= set(call)
+               for call in result.metadata["calls"])
 
 
 def test_numeric_and_boolean_standard_review_scalars_are_normalized(monkeypatch, council_settings):

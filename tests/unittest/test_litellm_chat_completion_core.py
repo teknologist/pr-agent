@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -36,12 +37,81 @@ class FakeSettings:
         return self._settings_values.get(key, default)
 
 
-def _mock_response():
+def _mock_response(content="ok", usage=None):
     mock = MagicMock()
-    response = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+    response = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
     mock.__getitem__.side_effect = response.__getitem__
     mock.dict.return_value = response
+    mock.usage = usage
     return mock
+
+
+@pytest.mark.asyncio
+async def test_metadata_completion_can_suppress_raw_council_logging(monkeypatch):
+    settings = FakeSettings(config_values={"seed": -1})
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: settings)
+    logger = MagicMock()
+    monkeypatch.setattr(litellm_handler, "get_logger", lambda: logger)
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response("raw chair output")
+        handler = litellm_handler.LiteLLMAIHandler()
+        handler.suppress_raw_logging = True
+
+        await handler.chat_completion_with_metadata(
+            model="gpt-4o",
+            system="raw member prompt",
+            user="raw peer ranking",
+        )
+
+    logged = repr(logger.mock_calls)
+    assert "raw member prompt" not in logged
+    assert "raw peer ranking" not in logged
+    assert "raw chair output" not in logged
+
+
+@pytest.mark.asyncio
+async def test_metadata_completion_suppresses_raw_council_error_logging(monkeypatch):
+    class FakeAPIError(Exception):
+        pass
+
+    settings = FakeSettings(config_values={"seed": -1})
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: settings)
+    monkeypatch.setattr(litellm_handler.openai, "APIError", FakeAPIError)
+    logger = MagicMock()
+    monkeypatch.setattr(litellm_handler, "get_logger", lambda: logger)
+    secret = "raw member peer ranking prompt chair output"
+    handler = litellm_handler.LiteLLMAIHandler()
+    handler.suppress_raw_logging = True
+    handler._get_completion = AsyncMock(side_effect=RuntimeError(secret))
+
+    with pytest.raises(FakeAPIError):
+        await handler.chat_completion_with_metadata(
+            model="gpt-4o",
+            system="raw member prompt",
+            user="raw peer ranking",
+        )
+
+    assert secret not in repr(logger.mock_calls)
+
+
+@pytest.mark.asyncio
+async def test_metadata_completion_returns_numeric_token_usage(monkeypatch):
+    settings = FakeSettings(config_values={"seed": -1})
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: settings)
+    usage = SimpleNamespace(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response(usage=usage)
+        handler = litellm_handler.LiteLLMAIHandler()
+
+        result = await handler.chat_completion_with_metadata(model="gpt-4o", system="sys", user="usr")
+
+    assert result.metadata["token_usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
 
 
 @pytest.mark.asyncio
@@ -181,6 +251,29 @@ async def test_chat_completion_combines_prompts_for_user_message_only_models(mon
 
     messages = mock_call.call_args.kwargs["messages"]
     assert messages == [{"role": "user", "content": "sys\n\n\nusr"}]
+
+
+@pytest.mark.asyncio
+async def test_get_completion_suppresses_streaming_error_details_for_council(monkeypatch):
+    class FailingStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise RuntimeError("raw partial council output")
+
+    logger = MagicMock()
+    monkeypatch.setattr(litellm_handler, "get_logger", lambda: logger)
+    handler = litellm_handler.LiteLLMAIHandler.__new__(litellm_handler.LiteLLMAIHandler)
+    handler.streaming_required_models = ["streaming-model"]
+    handler.suppress_raw_logging = True
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = FailingStream()
+        with pytest.raises(RuntimeError, match="raw partial council output"):
+            await handler._get_completion(model="streaming-model", messages=[])
+
+    assert "raw partial council output" not in repr(logger.mock_calls)
 
 
 @pytest.mark.asyncio

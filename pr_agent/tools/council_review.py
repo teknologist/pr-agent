@@ -63,6 +63,7 @@ _CONTRIBUTION_TIME_COST_SCHEMA = {"best_case": str, "average_case": str, "worst_
 _TODO_SECTION_SCHEMA = {"relevant_file": str, "line_number": int, "content": str}
 _SUB_PR_SCHEMA = {"relevant_files": list, "title": str}
 _NUMBERED_DIFF_LINE = re.compile(r"^\d+\s+[ +\-](.*)$")
+_MAX_COUNCIL_FAN_OUT = 5
 
 
 @dataclass(frozen=True)
@@ -205,45 +206,47 @@ class CouncilReviewRunner:
         self.ai_handler_factory = ai_handler_factory
         self.main_language = main_language
         self.ai_handler = self._new_handler()
+        self.call_metadata: list[dict[str, Any]] = []
 
     async def run(self) -> CouncilReviewResult:
-        member_results = await asyncio.gather(
-            *(self._run_member(member, index) for index, member in enumerate(self.config.members, start=1)),
-            return_exceptions=True,
-        )
+        member_results = await self._run_stage([
+            self._run_member(member, index) for index, member in enumerate(self.config.members, start=1)
+        ])
         successful_reviews = []
         failed_members = 0
         for result in member_results:
             if isinstance(result, BaseException):
                 failed_members += 1
-                get_logger().warning("Council member review failed", artifact={"error": str(result)})
+                get_logger().warning("Council member review failed")
             else:
                 successful_reviews.append(result)
 
-        if len(successful_reviews) < 2:
+        quorum = {"required": 2, "successful": len(successful_reviews), "met": len(successful_reviews) >= 2}
+        get_logger().info(
+            "Council Review quorum evaluated",
+            artifact={"strategy": "council_review", "stage": "independent_review", "quorum": quorum},
+        )
+        if not quorum["met"]:
             raise CouncilReviewError("Council Review failed because fewer than two members returned parseable reviews.")
 
         peer_evaluations = []
         failed_peer_evaluations = 0
         if self.config.peer_evaluation:
-            peer_results = await asyncio.gather(
-                *(
-                    self._run_peer_evaluation(member, index, successful_reviews)
-                    for index, member in enumerate(self.config.members, start=1)
-                ),
-                return_exceptions=True,
-            )
+            peer_results = await self._run_stage([
+                self._run_peer_evaluation(member, index, successful_reviews)
+                for index, member in enumerate(self.config.members, start=1)
+            ])
             for result in peer_results:
                 if isinstance(result, BaseException):
                     failed_peer_evaluations += 1
-                    get_logger().warning("Council peer evaluation failed", artifact={"error": str(result)})
+                    get_logger().warning("Council peer evaluation failed")
                 else:
                     peer_evaluations.append(result)
 
         try:
             chair_response, chair_metadata = await self._run_chair(successful_reviews, peer_evaluations)
         except Exception as exc:
-            get_logger().warning("Council chair synthesis failed", artifact={"error": str(exc)})
+            get_logger().warning("Council chair synthesis failed")
             raise CouncilReviewError("Council Review failed during chair synthesis.") from exc
 
         metadata = {
@@ -251,10 +254,17 @@ class CouncilReviewRunner:
             "member_count": len(self.config.members),
             "successful_member_count": len(successful_reviews),
             "failed_member_count": failed_members,
+            "quorum": quorum,
             "peer_evaluation_enabled": self.config.peer_evaluation,
             "successful_peer_evaluation_count": len(peer_evaluations),
             "failed_peer_evaluation_count": failed_peer_evaluations,
             "chair_model": self.config.chair.model,
+            "fallback_decisions": {
+                "standard_review": "not_used",
+                "chair_fallback": "not_used",
+                "member_fallback": "not_used",
+            },
+            "calls": list(self.call_metadata),
             "warnings": chair_metadata.get("warnings", []),
         }
         return CouncilReviewResult(prediction=chair_response, metadata=metadata)
@@ -274,13 +284,14 @@ class CouncilReviewRunner:
         variables["diff"] = patches_diff
         system_prompt = _render_prompt(get_settings().pr_review_prompt.system, variables)
         user_prompt = _render_prompt(get_settings().pr_review_prompt.user, variables)
-        result = await self.ai_handler.chat_completion_with_metadata(
-            model=member.model,
-            system=system_prompt,
-            user=user_prompt,
-            inference_settings=member.inference_settings,
+        result, parsed = await self._complete_call(
+            stage="independent_review",
+            role="member",
+            participant=member,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            parse_response=lambda response: _parse_review_prediction(response, variables),
         )
-        parsed = _parse_review_prediction(result.response, variables)
         return CouncilMemberReview(
             label=f"response_{index}",
             model=member.model,
@@ -304,19 +315,19 @@ class CouncilReviewRunner:
         variables.pop("diff", None)
         system_prompt = _render_prompt(get_settings().pr_council_review_prompt.peer_system, variables)
         user_prompt = _render_prompt(get_settings().pr_council_review_prompt.peer_user, variables)
-        result = await self.ai_handler.chat_completion_with_metadata(
-            model=member.model,
-            system=system_prompt,
-            user=user_prompt,
-            inference_settings=member.inference_settings,
+        expected_labels = [review.label for review in member_reviews]
+        result, parsed = await self._complete_call(
+            stage="peer_evaluation",
+            role="peer",
+            participant=member,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            parse_response=lambda response: _parse_peer_evaluation(response, expected_labels),
         )
         return CouncilPeerEvaluation(
             evaluator_label=f"evaluator_{index}",
             response=result.response,
-            parsed=_parse_peer_evaluation(
-                result.response,
-                expected_labels=[review.label for review in member_reviews],
-            ),
+            parsed=parsed,
             metadata=result.metadata,
         )
 
@@ -335,18 +346,94 @@ class CouncilReviewRunner:
         variables.pop("diff", None)
         system_prompt = _render_prompt(get_settings().pr_council_review_prompt.system, variables)
         user_prompt = _render_prompt(get_settings().pr_council_review_prompt.user, variables)
-        result = await self.ai_handler.chat_completion_with_metadata(
-            model=self.config.chair.model,
-            system=system_prompt,
-            user=user_prompt,
-            inference_settings=self.config.chair.inference_settings,
+        result, parsed = await self._complete_call(
+            stage="chair_synthesis",
+            role="chair",
+            participant=self.config.chair,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            parse_response=lambda response: _parse_review_prediction(response, variables),
         )
-        parsed = _parse_review_prediction(result.response, variables)
         return yaml.safe_dump(parsed, sort_keys=False), result.metadata
+
+    async def _run_stage(self, operations: list[Any]) -> list[Any]:
+        if len(operations) > _MAX_COUNCIL_FAN_OUT:
+            for operation in operations:
+                operation.close()
+            raise CouncilReviewError("Council Review stage exceeds the five-member fan-out limit.")
+
+        tasks = [asyncio.create_task(operation) for operation in operations]
+        try:
+            return await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+    async def _complete_call(
+        self,
+        *,
+        stage: str,
+        role: str,
+        participant: CouncilModelConfig,
+        system_prompt: str,
+        user_prompt: str,
+        parse_response: Callable[[str], Any],
+    ) -> tuple[Any, Any]:
+        started_at = asyncio.get_running_loop().time()
+        result = None
+        try:
+            result = await asyncio.wait_for(
+                self.ai_handler.chat_completion_with_metadata(
+                    model=participant.model,
+                    system=system_prompt,
+                    user=user_prompt,
+                    inference_settings=participant.inference_settings,
+                ),
+                timeout=get_settings().config.ai_timeout,
+            )
+            parsed = parse_response(result.response)
+        except asyncio.TimeoutError:
+            self._record_call(stage, role, participant.model, started_at, "timeout")
+            raise
+        except asyncio.CancelledError:
+            self._record_call(stage, role, participant.model, started_at, "cancelled")
+            raise
+        except BaseException:
+            self._record_call(stage, role, participant.model, started_at, "failure")
+            raise
+
+        token_usage = result.metadata.get("token_usage", result.metadata.get("usage"))
+        self._record_call(stage, role, participant.model, started_at, "success", token_usage)
+        return result, parsed
+
+    def _record_call(
+        self,
+        stage: str,
+        role: str,
+        model: str,
+        started_at: float,
+        outcome: str,
+        token_usage: Any = None,
+    ) -> None:
+        metadata = {
+            "strategy": "council_review",
+            "stage": stage,
+            "role": role,
+            "model": model,
+            "duration_ms": round((asyncio.get_running_loop().time() - started_at) * 1000, 3),
+            "outcome": outcome,
+        }
+        if token_usage is not None:
+            metadata["token_usage"] = token_usage
+        self.call_metadata.append(metadata)
+        get_logger().info("Council Review call completed", artifact=metadata)
 
     def _new_handler(self) -> BaseAiHandler:
         handler = self.ai_handler_factory()
         handler.main_pr_language = self.main_language
+        handler.suppress_raw_logging = True
         return handler
 
 

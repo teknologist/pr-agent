@@ -484,6 +484,7 @@ class LiteLLMAIHandler(BaseAiHandler):
             try:
                 resp, finish_reason = None, None
                 metadata = {"warnings": []}
+                suppress_raw_logging = getattr(self, "suppress_raw_logging", False)
                 settings = get_settings()
                 if temperature is None:
                     temperature = settings.config.temperature
@@ -749,9 +750,10 @@ class LiteLLMAIHandler(BaseAiHandler):
                     kwargs["model_id"] = model_id
                     get_logger().info(f"Using Bedrock custom inference profile: {model_id}")
 
-                get_logger().debug("Prompts", artifact={"system": system, "user": user})
+                if not suppress_raw_logging:
+                    get_logger().debug("Prompts", artifact={"system": system, "user": user})
 
-                if get_settings().config.verbosity_level >= 2:
+                if get_settings().config.verbosity_level >= 2 and not suppress_raw_logging:
                     get_logger().info(f"\nSystem prompt:\n{system}")
                     get_logger().info(f"\nUser prompt:\n{user}")
 
@@ -767,7 +769,10 @@ class LiteLLMAIHandler(BaseAiHandler):
                 resp, finish_reason, response_obj = await self._get_completion(**kwargs)
 
             except openai.RateLimitError as e:
-                get_logger().error(f"Rate limit error during LLM inference: {e}")
+                if suppress_raw_logging:
+                    get_logger().error("Rate limit error during LLM inference")
+                else:
+                    get_logger().error(f"Rate limit error during LLM inference: {e}")
                 raise
             except openai.APIError as e:
                 if _bedrock_imds and not self._aws_imds_fell_back and self._aws_static_creds:
@@ -778,21 +783,38 @@ class LiteLLMAIHandler(BaseAiHandler):
                     # allowing a concurrent coroutine to overwrite os.environ.
                     resp, finish_reason, response_obj = await self._get_completion(**kwargs)
                 else:
-                    get_logger().warning(f"Error during LLM inference: {e}")
+                    if suppress_raw_logging:
+                        get_logger().warning("Error during LLM inference")
+                    else:
+                        get_logger().warning(f"Error during LLM inference: {e}")
                     raise
             except Exception as e:
-                get_logger().warning(f"Unknown error during LLM inference: {e}")
+                if suppress_raw_logging:
+                    get_logger().warning("Unknown error during LLM inference")
+                else:
+                    get_logger().warning(f"Unknown error during LLM inference: {e}")
                 raise openai.APIError from e
 
-            get_logger().debug(f"\nAI response:\n{resp}")
+            if not suppress_raw_logging:
+                get_logger().debug(f"\nAI response:\n{resp}")
 
-            # log the full response for debugging
-            response_log = self.prepare_logs(response_obj, system, user, resp, finish_reason)
-            get_logger().debug("Full_response", artifact=response_log)
+                # log the full response for debugging
+                response_log = self.prepare_logs(response_obj, system, user, resp, finish_reason)
+                get_logger().debug("Full_response", artifact=response_log)
 
-            # for CLI debugging
-            if get_settings().config.verbosity_level >= 2:
-                get_logger().info(f"\nAI response:\n{resp}")
+                # for CLI debugging
+                if get_settings().config.verbosity_level >= 2:
+                    get_logger().info(f"\nAI response:\n{resp}")
+
+            usage = getattr(response_obj, "usage", None)
+            if usage is not None:
+                token_usage = {}
+                for field_name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    value = usage.get(field_name) if isinstance(usage, dict) else getattr(usage, field_name, None)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        token_usage[field_name] = value
+                if token_usage:
+                    metadata["token_usage"] = token_usage
 
             if _return_metadata:
                 return ChatCompletionResult(resp, finish_reason, metadata)
@@ -827,7 +849,10 @@ class LiteLLMAIHandler(BaseAiHandler):
             kwargs["stream"] = True
             get_logger().info(f"Using streaming mode for model {model}")
             response = await acompletion(**kwargs)
-            resp, finish_reason = await _handle_streaming_response(response)
+            resp, finish_reason = await _handle_streaming_response(
+                response,
+                suppress_raw_logging=getattr(self, "suppress_raw_logging", False),
+            )
             # Create MockResponse for streaming since we don't have the full response object
             mock_response = MockResponse(resp, finish_reason)
             return resp, finish_reason, mock_response
