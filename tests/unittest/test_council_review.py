@@ -19,6 +19,24 @@ _VALID_REVIEW = """review:
     No
 """
 
+_VALID_REVIEW_WITH_FINDING = """review:
+  relevant_tests: |
+    Yes
+  key_issues_to_review:
+  - relevant_file: |
+      pr_agent/tools/council_review.py
+    issue_header: |
+      Possible Bug
+    issue_content: |
+      raw diff with secret line
+    start_line: 1
+    end_line: 1
+  security_concerns: |
+    No
+"""
+
+_VALID_REVIEW_WITH_SHORT_DIFF_FINDING = _VALID_REVIEW_WITH_FINDING.replace("raw diff with secret line", "secret")
+
 
 def _base_vars():
     return {
@@ -98,6 +116,8 @@ def test_absent_configuration_selects_standard_review(council_settings):
         [{"model": "a"}, {"model": "b", "reasoning_effort": "invalid"}],
         [{"model": "a"}, {"model": "b", "temperatur": 0.1}],
         [{"model": "a"}, {"model": "b", "temperature": float("nan")}],
+        [{"model": "a"}, {"model": "b", "temperature": -0.1}],
+        [{"model": "a"}, {"model": "b", "temperature": 2.1}],
     ],
 )
 def test_enabled_configuration_rejects_malformed_rosters_or_inference_settings(council_settings, members):
@@ -221,7 +241,8 @@ def test_successful_council_uses_member_models_model_specific_diffs_and_returns_
         "pr_agent.tools.council_review.get_pr_diff",
         lambda git_provider, token_handler, model, **kwargs: diff_models.append(model) or f"diff-for-{model}",
     )
-    _reset_fake_handler({"member-a": _VALID_REVIEW, "member-b": _VALID_REVIEW, "chair": _VALID_REVIEW})
+    review_with_echoed_diff = f"{_VALID_REVIEW}\nraw_pr_diff: |\n  raw diff\n"
+    _reset_fake_handler({"member-a": review_with_echoed_diff, "member-b": _VALID_REVIEW, "chair": _VALID_REVIEW})
 
     result = asyncio.run(_runner(config).run())
 
@@ -233,6 +254,41 @@ def test_successful_council_uses_member_models_model_specific_diffs_and_returns_
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b", "chair"]
     assert "diff-for-member-a" in FakeAiHandler.calls[0]["user"]
     assert "diff-for-member-b" in FakeAiHandler.calls[1]["user"]
+    assert "raw diff" not in FakeAiHandler.calls[-1]["user"]
+
+
+@pytest.mark.parametrize(
+    ("source_diff", "member_review", "secret_text"),
+    [
+        ("raw diff with secret line", _VALID_REVIEW_WITH_FINDING, "raw diff with secret line"),
+        ("+secret", _VALID_REVIEW_WITH_SHORT_DIFF_FINDING, "secret"),
+    ],
+)
+def test_member_review_diff_content_is_redacted_before_chair(
+    monkeypatch,
+    council_settings,
+    source_diff,
+    member_review,
+    secret_text,
+):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: source_diff)
+    _reset_fake_handler({
+        "member-a": member_review,
+        "member-b": _VALID_REVIEW,
+        "chair": _VALID_REVIEW,
+    })
+
+    result = asyncio.run(_runner(config).run())
+
+    assert result.metadata["successful_member_count"] == 2
+    assert secret_text not in FakeAiHandler.calls[-1]["user"]
+    assert "[redacted" in FakeAiHandler.calls[-1]["user"]
 
 
 def test_malformed_member_does_not_count_toward_quorum_but_successful_reviews_go_to_chair(
@@ -261,6 +317,102 @@ def test_malformed_member_does_not_count_toward_quorum_but_successful_reviews_go
     assert chair_call["model"] == "chair"
     assert chair_call["user"].count("Member Review") == 2
     assert "raw diff" not in chair_call["user"]
+
+
+@pytest.mark.parametrize(
+    "invalid_review",
+    [
+        "review: {}",
+        """review:
+  relevant_tests: |
+    Yes
+  key_issues_to_review:
+  - scalar issue
+  security_concerns: |
+    No
+""",
+        """review:
+  relevant_tests: |
+    Yes
+  key_issues_to_review: []
+  security_concerns: |
+    No
+  raw_pr_diff: |
+    raw diff
+""",
+    ],
+)
+def test_structurally_invalid_member_does_not_count_toward_quorum(monkeypatch, council_settings, invalid_review):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({"member-a": invalid_review, "member-b": _VALID_REVIEW, "chair": _VALID_REVIEW})
+
+    with pytest.raises(CouncilReviewError, match="fewer than two"):
+        asyncio.run(_runner(config).run())
+
+    assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b"]
+
+
+def test_numeric_and_boolean_standard_review_scalars_are_normalized(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    config_vars = _base_vars()
+    config_vars["require_score"] = True
+    config_vars["require_estimate_effort_to_review"] = True
+    scalar_review = """review:
+  estimated_effort_to_review_[1-5]: '3'
+  score: 89
+  relevant_tests: Yes
+  key_issues_to_review: []
+  security_concerns: No
+"""
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({"member-a": scalar_review, "member-b": scalar_review, "chair": scalar_review})
+
+    result = asyncio.run(CouncilReviewRunner(
+        config=config,
+        git_provider=SimpleNamespace(),
+        token_handler=SimpleNamespace(),
+        vars=config_vars,
+        ai_handler_factory=FakeAiHandler,
+        main_language="Python",
+    ).run())
+
+    assert result.metadata["successful_member_count"] == 2
+
+
+def test_optional_prompt_fields_are_required_when_enabled(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    config_vars = _base_vars()
+    config_vars["require_score"] = True
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({"member-a": _VALID_REVIEW, "member-b": _VALID_REVIEW, "chair": _VALID_REVIEW})
+
+    with pytest.raises(CouncilReviewError, match="fewer than two"):
+        asyncio.run(CouncilReviewRunner(
+            config=config,
+            git_provider=SimpleNamespace(),
+            token_handler=SimpleNamespace(),
+            vars=config_vars,
+            ai_handler_factory=FakeAiHandler,
+            main_language="Python",
+        ).run())
+
+    assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b"]
 
 
 def test_no_quorum_raises_without_chair_or_standard_review_fallback(monkeypatch, council_settings):
