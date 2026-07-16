@@ -1,6 +1,6 @@
 [flake8]
 max-line-length = 120
-extend-exclude = .venv,.codesight
+extend-exclude = .venv,.codesight,.worktrees
 
 # Baseline ignores for pre-existing repository-wide flake8 violations.
 # PYTTECH-7620 touched files remain fully checked while bare `flake8`
