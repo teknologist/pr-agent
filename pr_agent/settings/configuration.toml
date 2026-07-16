@@ -109,9 +109,14 @@ enable_intro_text=true
 enable_help_text=false # Determines whether to include help text in the PR review. Enabled by default.
 
 [pr_council_review]
+# Council Review is opt-in. Invalid enabled configurations fall back to Standard Review.
 enabled=false
+# When enabled, each successful member evaluates the other anonymized member responses before chair synthesis.
 peer_evaluation=true
+# Configure 2-5 members. Each entry requires model and may override temperature and reasoning_effort.
 members=[]
+# The chair entry requires model and may override temperature and reasoning_effort.
+# Credentials use existing provider settings and .secrets.toml; timeouts use [config].ai_timeout.
 chair={}
 
 [pr_description] # /describe #
