@@ -860,12 +860,12 @@ class LiteLLMAIHandler(BaseAiHandler):
             kwargs["stream"] = True
             get_logger().info(f"Using streaming mode for model {model}")
             response = await acompletion(**kwargs)
-            resp, finish_reason = await _handle_streaming_response(
+            resp, finish_reason, usage = await _handle_streaming_response(
                 response,
                 suppress_raw_logging=getattr(self, "suppress_raw_logging", False),
             )
             # Create MockResponse for streaming since we don't have the full response object
-            mock_response = MockResponse(resp, finish_reason)
+            mock_response = MockResponse(resp, finish_reason, usage)
             return resp, finish_reason, mock_response
         else:
             response = await acompletion(**kwargs)

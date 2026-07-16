@@ -307,6 +307,24 @@ async def test_get_completion_suppresses_streaming_error_details_for_council(mon
 
 
 @pytest.mark.asyncio
+async def test_streaming_response_preserves_available_token_usage():
+    usage = SimpleNamespace(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+
+    async def stream():
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content="ok"), finish_reason="stop")],
+            usage=None,
+        )
+        yield SimpleNamespace(choices=[], usage=usage)
+
+    response, finish_reason, response_usage = await litellm_handler._handle_streaming_response(stream())
+
+    assert response == "ok"
+    assert finish_reason == "stop"
+    assert response_usage is usage
+
+
+@pytest.mark.asyncio
 async def test_get_completion_uses_streaming_for_required_models():
     handler = litellm_handler.LiteLLMAIHandler.__new__(litellm_handler.LiteLLMAIHandler)
     handler.streaming_required_models = ["streaming-model"]
@@ -315,7 +333,8 @@ async def test_get_completion_uses_streaming_for_required_models():
             patch("pr_agent.algo.ai_handlers.litellm_ai_handler._handle_streaming_response",
                   new_callable=AsyncMock) as mock_stream:
         mock_call.return_value = "stream"
-        mock_stream.return_value = ("streamed text", "stop")
+        usage = SimpleNamespace(total_tokens=18)
+        mock_stream.return_value = ("streamed text", "stop", usage)
 
         resp, finish_reason, response_obj = await handler._get_completion(
             model="streaming-model",
@@ -326,6 +345,7 @@ async def test_get_completion_uses_streaming_for_required_models():
     assert resp == "streamed text"
     assert finish_reason == "stop"
     assert response_obj.dict()["choices"][0]["message"]["content"] == "streamed text"
+    assert response_obj.usage is usage
 
 
 @pytest.mark.asyncio
