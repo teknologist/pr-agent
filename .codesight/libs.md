@@ -1,0 +1,252 @@
+# Libraries
+
+- `pr_agent/agent/pr_agent.py` — class PRAgent
+- `pr_agent/algo/ai_handlers/base_ai_handler.py`
+  - class ModelInferenceSettings
+  - class ChatCompletionResult
+  - class BaseAiHandler
+- `pr_agent/algo/ai_handlers/langchain_ai_handler.py` — class LangChainOpenAIHandler
+- `pr_agent/algo/ai_handlers/litellm_ai_handler.py` — class LiteLLMAIHandler
+- `pr_agent/algo/ai_handlers/litellm_helpers.py` — class MockResponse
+- `pr_agent/algo/ai_handlers/openai_ai_handler.py` — class OpenAIHandler
+- `pr_agent/algo/artifacts.py`
+  - function resolve_artifact_path: (path) -> Optional[Path]
+  - function format_artifact_content: (content, label, instructions) -> str
+  - function load_artifact: () -> str
+- `pr_agent/algo/cli_args.py` — class CliArgs
+- `pr_agent/algo/file_filter.py` — function filter_ignored: (files, platform), function translate_globs_to_regexes: (globs)
+- `pr_agent/algo/git_patch_processing.py`
+  - function extend_patch: (original_file_str, patch_str, patch_extra_lines_before, patch_extra_lines_after, filename, new_file_str) -> str
+  - function decode_if_bytes: (original_file_str)
+  - function should_skip_patch: (filename)
+  - function process_patch_lines: (patch_str, original_file_str, patch_extra_lines_before, patch_extra_lines_after, new_file_str)
+  - function check_if_hunk_lines_matches_to_file: (i, original_lines, patch_lines, start1)
+  - function extract_hunk_headers: (match)
+  - _...4 more_
+- `pr_agent/algo/language_handler.py`
+  - function filter_bad_extensions: (files)
+  - function is_valid_file: (filename, bad_extensions) -> bool
+  - function sort_files_by_main_languages: (languages, files)
+- `pr_agent/algo/pr_processing.py`
+  - function cap_and_log_extra_lines: (value, direction) -> int
+  - function get_pr_diff: (git_provider, token_handler, model, add_line_numbers_to_hunks, disable_extra_lines, large_pr_handling, return_remaining_files)
+  - function get_pr_diff_multiple_patchs: (git_provider, token_handler, model, add_line_numbers_to_hunks, disable_extra_lines)
+  - function pr_generate_extended_diff: (pr_languages, token_handler, add_line_numbers_to_hunks, patch_extra_lines_before, patch_extra_lines_after) -> Tuple[list, int, list]
+  - function pr_generate_compressed_diff: (top_langs, token_handler, model, convert_hunks_to_line_numbers, large_pr_handling) -> Tuple[list, list, list, list, dict, list]
+  - function generate_full_patch: (convert_hunks_to_line_numbers, file_dict, max_tokens_model, remaining_files_list_prev, token_handler)
+  - _...4 more_
+- `pr_agent/algo/repo_context.py`
+  - function render_instruction_files: (files, str]) -> str
+  - function render_instruction_files_with_line_budget: (files, str], max_lines) -> str
+  - function build_repo_context: (git_provider) -> str
+- `pr_agent/algo/skills_loader.py`
+  - function discover_skills: (paths) -> List[Skill]
+  - function format_skills_context: (skills, max_tokens) -> str
+  - function get_skills_context: () -> str
+  - class SkillResource
+  - class Skill
+- `pr_agent/algo/token_handler.py`
+  - class ModelTypeValidator
+  - class TokenEncoder
+  - class TokenHandler
+- `pr_agent/algo/types.py` — class EDIT_TYPE, class FilePatchInfo
+- `pr_agent/algo/utils.py`
+  - function get_model: (model_type) -> str
+  - function get_setting: (key) -> Any
+  - function emphasize_header: (text, only_markdown, reference_link) -> str
+  - function unique_strings: (input_list) -> List[str]
+  - function convert_to_markdown_v2: (output_data, gfm_supported, incremental_review, git_provider, files) -> str
+  - function extract_relevant_lines_str: (end_line, files, relevant_file, start_line, dedent) -> str
+  - _...35 more_
+- `pr_agent/cli.py`
+  - function set_parser: ()
+  - function run_command: (pr_url, command)
+  - function run: (inargs, args)
+- `pr_agent/cli_pip.py` — function main: ()
+- `pr_agent/config_loader.py`
+  - function get_settings: (use_context)
+  - function apply_secrets_manager_config: ()
+  - function apply_secrets_to_config: (secrets)
+- `pr_agent/custom_merge_loader.py` — function load: (obj, env, silent, key, filename), function validate_file_security: (file_data, filename)
+- `pr_agent/git_providers/__init__.py` — function get_git_provider: (), function get_git_provider_with_context: (pr_url) -> GitProvider
+- `pr_agent/git_providers/azuredevops_provider.py` — class AzureDevopsProvider
+- `pr_agent/git_providers/bitbucket_provider.py` — class BitbucketProvider
+- `pr_agent/git_providers/bitbucket_server_provider.py` — class BitbucketServerProvider
+- `pr_agent/git_providers/codecommit_client.py`
+  - class CodeCommitDifferencesResponse
+  - class CodeCommitPullRequestResponse
+  - class CodeCommitClient
+- `pr_agent/git_providers/codecommit_provider.py`
+  - class PullRequestCCMimic
+  - class CodeCommitFile
+  - class CodeCommitProvider
+- `pr_agent/git_providers/diff_parsing.py`
+  - function to_hunk_only_patch: (patch_str) -> str
+  - function parse_unified_diff: (diff_text) -> list[FilePatchInfo]
+  - function reconstruct_base_file: (head_file_str, patch_str) -> str
+- `pr_agent/git_providers/gerrit_provider.py`
+  - function clone: (url, directory)
+  - function fetch: (url, refspec, cwd)
+  - function checkout: (cwd)
+  - function show: (*args, cwd)
+  - function diff: (*args, cwd)
+  - function reset_local_changes: (cwd)
+  - _...7 more_
+- `pr_agent/git_providers/git_provider.py`
+  - function get_cached_global_settings: (cache_key, fetch_fn)
+  - function get_git_ssl_env: () -> dict[str, str]
+  - function get_main_pr_language: (languages, files) -> str
+  - class GitProvider
+  - class IncrementalPR
+- `pr_agent/git_providers/gitea_provider.py` — class GiteaProvider, class RepoApi
+- `pr_agent/git_providers/github_provider.py` — class GithubProvider
+- `pr_agent/git_providers/gitlab_provider.py` — class DiffNotFoundError, class GitLabProvider
+- `pr_agent/git_providers/local_git_provider.py` — class PullRequestMimic, class LocalGitProvider
+- `pr_agent/git_providers/plain_diff_provider.py` — class PullRequestMimic, class PlainDiffGitProvider
+- `pr_agent/git_providers/utils.py`
+  - function apply_repo_settings: (pr_url)
+  - function handle_configurations_errors: (config_errors, git_provider)
+  - function set_claude_model: ()
+- `pr_agent/identity_providers/__init__.py` — function get_identity_provider: ()
+- `pr_agent/identity_providers/default_identity_provider.py` — class DefaultIdentityProvider
+- `pr_agent/identity_providers/identity_provider.py` — class Eligibility, class IdentityProvider
+- `pr_agent/log/__init__.py`
+  - function json_format: (record) -> str
+  - function analytics_filter: (record) -> bool
+  - function inv_analytics_filter: (record) -> bool
+  - function setup_logger: (level, fmt)
+  - function get_logger: (*args, **kwargs)
+  - class LoggingFormat
+- `pr_agent/mosaico/card.py` — function build_agent_card: () -> AgentCard
+- `pr_agent/mosaico/diff_provider.py` — function parse_unified_diff: (diff_text) -> List[FilePatchInfo], class DiffInputProvider
+- `pr_agent/mosaico/dispatch.py`
+  - function route_and_run_result: (user_text) -> "RouteResult"
+  - function route_and_run: (user_text) -> str
+  - class RouteResult
+- `pr_agent/mosaico/env_bridge.py` — function langfuse_env_present: () -> bool, function apply_mosaico_env: () -> None
+- `pr_agent/mosaico/executor.py` — function health_check: () -> str, class PRAgentExecutor
+- `pr_agent/mosaico/observability.py`
+  - function parse_observability_metadata: (raw) -> dict
+  - function mosaico_log_context: (meta, context_id)
+  - function langfuse_span: (meta, context_id)
+- `pr_agent/mosaico/server.py` — function build_app: (), function start: () -> None
+- `pr_agent/secret_providers/__init__.py` — function get_secret_provider: ()
+- `pr_agent/secret_providers/aws_secrets_manager_provider.py` — class AWSSecretsManagerProvider
+- `pr_agent/secret_providers/google_cloud_storage_secret_provider.py` — class GoogleCloudStorageSecretProvider
+- `pr_agent/secret_providers/secret_provider.py` — class SecretProvider
+- `pr_agent/servers/azuredevops_server_webhook.py`
+  - function handle_line_comment: (body, thread_id, provider)
+  - function start: ()
+  - function handle_request_comment: (url, body, thread_id, comment_id, log_context)
+  - function handle_request_azure: (data, log_context)
+  - function handle_webhook: (background_tasks, request)
+  - function root: ()
+- `pr_agent/servers/bitbucket_app.py`
+  - function is_bot_user: (data) -> bool
+  - function should_process_pr_logic: (data) -> bool
+  - function start: ()
+  - function get_bearer_token: (shared_secret, client_key)
+  - function handle_manifest: (request, response)
+  - function handle_github_webhooks: (background_tasks, request)
+  - _...3 more_
+- `pr_agent/servers/bitbucket_server_webhook.py`
+  - function handle_request: (background_tasks, url, body, log_context)
+  - function should_process_pr_logic: (data) -> bool
+  - function start: ()
+  - function redirect_to_webhook: ()
+  - function handle_webhook: (background_tasks, request)
+  - function root: ()
+- `pr_agent/servers/gerrit_server.py`
+  - function start: ()
+  - function handle_gerrit_request: (action, item)
+  - function get_body: (request)
+  - function root: ()
+  - class Action
+  - class Item
+- `pr_agent/servers/gitea_app.py`
+  - function should_process_pr_logic: (body) -> bool
+  - function start: ()
+  - function handle_gitea_webhooks: (background_tasks, request, response)
+  - function get_body: (request)
+  - function handle_request: (body, Any], event)
+  - function handle_pr_event: (body, Any], event, action, agent)
+  - _...1 more_
+- `pr_agent/servers/github_action_runner.py`
+  - function is_true: (value, bool]) -> bool
+  - function get_setting_or_env: (key, default, bool]) -> Union[str, bool]
+  - function run_action: ()
+- `pr_agent/servers/github_app.py`
+  - function handle_closed_pr: (body, event, action, log_context)
+  - function get_log_context: (body, event, action, build_number)
+  - function is_bot_user: (sender, sender_type)
+  - function should_process_pr_logic: (body) -> bool
+  - function handle_line_comments: (body, comment_body, Any]) -> str
+  - function start: ()
+  - _...8 more_
+- `pr_agent/servers/github_lambda_webhook.py` — function lambda_handler: (event, context)
+- `pr_agent/servers/github_polling.py`
+  - function now: () -> str
+  - function run_handle_request: (pr_url, rest_of_comment, comment_id, git_provider)
+  - function process_comment_sync: (pr_url, rest_of_comment, comment_id)
+  - function mark_notification_as_read: (headers, notification, session)
+  - function async_handle_request: (pr_url, rest_of_comment, comment_id, git_provider)
+  - function process_comment: (pr_url, rest_of_comment, comment_id)
+  - _...2 more_
+- `pr_agent/servers/gitlab_lambda_webhook.py` — function lambda_handler: (event, context)
+- `pr_agent/servers/gitlab_webhook.py`
+  - function is_bot_user: (data) -> bool
+  - function is_draft: (data) -> bool
+  - function is_draft_ready: (data) -> bool
+  - function should_process_pr_logic: (data) -> bool
+  - function handle_ask_line: (body, data)
+  - function start: ()
+  - _...3 more_
+- `pr_agent/servers/help.py` — class HelpMessage
+- `pr_agent/servers/utils.py`
+  - function verify_signature: (payload_body, secret_token, signature_header)
+  - class RateLimitExceeded
+  - class DefaultDictWithTimeout
+- `pr_agent/tools/pr_add_docs.py` — function get_docs_for_language: (language, style), class PRAddDocs
+- `pr_agent/tools/pr_code_suggestions.py` — class PRCodeSuggestions
+- `pr_agent/tools/pr_config.py` — class PRConfig
+- `pr_agent/tools/pr_description.py`
+  - function sanitize_diagram: (diagram_raw) -> str
+  - function count_chars_without_html: (string)
+  - function insert_br_after_x_chars: (text, x)
+  - function replace_code_tags: (text)
+  - class PRDescription
+- `pr_agent/tools/pr_generate_labels.py` — class PRGenerateLabels
+- `pr_agent/tools/pr_help_docs.py`
+  - function modify_answer_section: (ai_response) -> str | None
+  - function extract_model_answer_and_relevant_sources: (ai_response) -> str | None
+  - function get_maximal_text_input_length_for_token_count_estimation: ()
+  - function return_document_headings: (text, ext) -> str
+  - function map_documentation_files_to_contents: (base_path, doc_files, max_allowed_file_len) -> dict[str, str]
+  - function aggregate_documentation_files_for_prompt_contents: (file_path_to_contents, str], return_just_headings) -> str
+  - _...5 more_
+- `pr_agent/tools/pr_help_message.py`
+  - function extract_header: (snippet)
+  - function generate_bbdc_table: (column_arr_1, column_arr_2)
+  - class PRHelpMessage
+- `pr_agent/tools/pr_line_questions.py` — class PR_LineQuestions
+- `pr_agent/tools/pr_questions.py` — class PRQuestions
+- `pr_agent/tools/pr_reviewer.py` — class PRReviewer
+- `pr_agent/tools/pr_similar_issue.py`
+  - class PRSimilarIssue
+  - class IssueLevel
+  - class Metadata
+  - class Record
+  - class Corpus
+- `pr_agent/tools/pr_update_changelog.py` — class PRUpdateChangelog
+- `pr_agent/tools/progress_comment.py`
+  - function get_progress_gif_url: () -> str
+  - function get_progress_gif_width: () -> int
+  - function build_progress_comment: () -> str
+- `pr_agent/tools/ticket_pr_compliance_check.py`
+  - function find_jira_tickets: (text)
+  - function extract_ticket_links_from_pr_description: (pr_description, repo_path, base_url_html)
+  - function extract_ticket_links_from_branch_name: (branch_name, repo_path, base_url_html)
+  - function check_tickets_relevancy: ()
+  - function extract_tickets: (git_provider)
+  - function extract_and_cache_pr_tickets: (git_provider, vars)
+- `scripts/set_pyproject_version.py` — function main: () -> None

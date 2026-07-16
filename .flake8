@@ -1,0 +1,7 @@
+[flake8]
+max-line-length = 120
+filename =
+    pr_agent/algo/ai_handlers/base_ai_handler.py
+    pr_agent/algo/ai_handlers/litellm_ai_handler.py
+    tests/unittest/test_litellm_chat_completion_core.py
+extend-exclude = .venv,.codesight

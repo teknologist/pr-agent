@@ -1,8 +1,10 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import pr_agent.algo.ai_handlers.litellm_ai_handler as litellm_handler
+from pr_agent.algo.ai_handlers.base_ai_handler import ModelInferenceSettings
 
 
 class FakeBox:
@@ -20,6 +22,7 @@ class FakeSettings:
         self.config = FakeBox(
             config_values or {},
             reasoning_effort=None,
+            temperature=0.2,
             ai_timeout=30,
             custom_reasoning_model=False,
             max_model_tokens=32000,
@@ -200,3 +203,270 @@ async def test_get_completion_uses_streaming_for_required_models():
     assert resp == "streamed text"
     assert finish_reason == "stop"
     assert response_obj.dict()["choices"][0]["message"]["content"] == "streamed text"
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_with_metadata_applies_request_scoped_overrides(monkeypatch):
+    settings = FakeSettings(
+        config_values={"seed": -1},
+        settings_values={},
+    )
+    settings.config.temperature = 0.7
+    settings.config.reasoning_effort = "low"
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: settings)
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response()
+        handler = litellm_handler.LiteLLMAIHandler()
+        handler.support_reasoning_models = ["reasoning-model"]
+
+        result = await handler.chat_completion_with_metadata(
+            model="reasoning-model",
+            system="sys",
+            user="usr",
+            inference_settings=ModelInferenceSettings(
+                temperature=0.1,
+                reasoning_effort="high",
+            ),
+        )
+
+    assert result.response == "ok"
+    assert result.finish_reason == "stop"
+    assert result.metadata["warnings"] == []
+    assert mock_call.call_args.kwargs["temperature"] == 0.1
+    assert mock_call.call_args.kwargs["reasoning_effort"] == "high"
+    assert settings.config.temperature == 0.7
+    assert settings.config.reasoning_effort == "low"
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_with_metadata_inherits_global_settings_when_overrides_omitted(monkeypatch):
+    settings = FakeSettings(config_values={"seed": -1})
+    settings.config.temperature = 0.6
+    settings.config.reasoning_effort = "medium"
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: settings)
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response()
+        handler = litellm_handler.LiteLLMAIHandler()
+        handler.support_reasoning_models = ["reasoning-model"]
+
+        result = await handler.chat_completion_with_metadata(
+            model="reasoning-model",
+            system="sys",
+            user="usr",
+        )
+
+    assert result.metadata["warnings"] == []
+    assert mock_call.call_args.kwargs["temperature"] == 0.6
+    assert mock_call.call_args.kwargs["reasoning_effort"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_with_metadata_warns_for_unsupported_overrides(monkeypatch):
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: FakeSettings(config_values={"seed": -1}))
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response()
+        handler = litellm_handler.LiteLLMAIHandler()
+        handler.no_support_temperature_models = ["no-temp-model"]
+        handler.support_reasoning_models = []
+
+        result = await handler.chat_completion_with_metadata(
+            model="no-temp-model",
+            system="sys",
+            user="usr",
+            inference_settings=ModelInferenceSettings(
+                temperature=0.1,
+                reasoning_effort="high",
+            ),
+        )
+
+    assert "temperature" not in mock_call.call_args.kwargs
+    assert "reasoning_effort" not in mock_call.call_args.kwargs
+    assert result.metadata["warnings"] == [
+        {
+            "code": "unsupported_inference_setting",
+            "setting": "temperature",
+            "message": "temperature override is not supported by model no-temp-model and was ignored.",
+        },
+        {
+            "code": "unsupported_inference_setting",
+            "setting": "reasoning_effort",
+            "message": "reasoning_effort override is not supported by model no-temp-model and was ignored.",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["openai/o3", "openrouter/openai/o3"])
+async def test_provider_prefixed_reasoning_model_uses_normalized_capabilities(monkeypatch, model):
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: FakeSettings(config_values={"seed": -1}))
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response()
+        handler = litellm_handler.LiteLLMAIHandler()
+
+        result = await handler.chat_completion_with_metadata(
+            model=model,
+            system="sys",
+            user="usr",
+            inference_settings=ModelInferenceSettings(
+                temperature=0.1,
+                reasoning_effort="high",
+            ),
+        )
+
+    assert "temperature" not in mock_call.call_args.kwargs
+    assert mock_call.call_args.kwargs["reasoning_effort"] == "high"
+    assert result.metadata["warnings"] == [
+        {
+            "code": "unsupported_inference_setting",
+            "setting": "temperature",
+            "message": f"temperature override is not supported by model {model} and was ignored.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_invalid_request_scoped_reasoning_effort_returns_metadata_warning(monkeypatch):
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: FakeSettings(config_values={"seed": -1}))
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response()
+        handler = litellm_handler.LiteLLMAIHandler()
+        handler.support_reasoning_models = ["reasoning-model"]
+
+        result = await handler.chat_completion_with_metadata(
+            model="reasoning-model",
+            system="sys",
+            user="usr",
+            inference_settings=ModelInferenceSettings(reasoning_effort="invalid"),
+        )
+
+    assert mock_call.call_args.kwargs["reasoning_effort"] == "medium"
+    assert result.metadata["warnings"] == [
+        {
+            "code": "invalid_inference_setting",
+            "setting": "reasoning_effort",
+            "message": "reasoning_effort override has invalid value 'invalid' and was ignored; using default 'medium'.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unsupported_temperature_override_does_not_trigger_seed_error(monkeypatch):
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: FakeSettings(config_values={"seed": 123}))
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response()
+        handler = litellm_handler.LiteLLMAIHandler()
+        handler.no_support_temperature_models = ["no-temp-model"]
+
+        result = await handler.chat_completion_with_metadata(
+            model="no-temp-model",
+            system="sys",
+            user="usr",
+            inference_settings=ModelInferenceSettings(temperature=0.1),
+        )
+
+    assert "temperature" not in mock_call.call_args.kwargs
+    assert mock_call.call_args.kwargs["seed"] == 123
+    assert result.response == "ok"
+    assert result.metadata["warnings"] == [
+        {
+            "code": "unsupported_inference_setting",
+            "setting": "temperature",
+            "message": "temperature override is not supported by model no-temp-model and was ignored.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_extended_thinking_warns_when_temperature_override_is_forced(monkeypatch):
+    settings = FakeSettings(
+        config_values={
+            "enable_claude_extended_thinking": True,
+            "extended_thinking_budget_tokens": 1024,
+            "extended_thinking_max_output_tokens": 2048,
+            "seed": -1,
+        }
+    )
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: settings)
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response()
+        handler = litellm_handler.LiteLLMAIHandler()
+        handler.claude_extended_thinking_models = ["claude-thinking-model"]
+
+        result = await handler.chat_completion_with_metadata(
+            model="claude-thinking-model",
+            system="sys",
+            user="usr",
+            inference_settings=ModelInferenceSettings(temperature=0.2),
+        )
+
+    assert mock_call.call_args.kwargs["temperature"] == 1
+    assert result.metadata["warnings"] == [
+        {
+            "code": "unsupported_inference_setting",
+            "setting": "temperature",
+            "message": (
+                "temperature override is not supported by model "
+                "claude-thinking-model and was ignored."
+            ),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_chat_completion_overrides_do_not_leak(monkeypatch):
+    settings = FakeSettings(config_values={"seed": -1})
+    settings.config.temperature = 0.4
+    settings.config.reasoning_effort = "medium"
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: settings)
+
+    captured_kwargs = []
+    both_calls_started = asyncio.Event()
+
+    async def fake_acompletion(**kwargs):
+        captured_kwargs.append(kwargs)
+        if len(captured_kwargs) == 2:
+            both_calls_started.set()
+        await both_calls_started.wait()
+        return _mock_response()
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", side_effect=fake_acompletion):
+        handler = litellm_handler.LiteLLMAIHandler()
+        handler.support_reasoning_models = ["model-a", "model-b"]
+
+        result_a, result_b = await asyncio.gather(
+            handler.chat_completion_with_metadata(
+                model="model-a",
+                system="sys",
+                user="usr-a",
+                inference_settings=ModelInferenceSettings(
+                    temperature=0.1,
+                    reasoning_effort="low",
+                ),
+            ),
+            handler.chat_completion_with_metadata(
+                model="model-b",
+                system="sys",
+                user="usr-b",
+                inference_settings=ModelInferenceSettings(
+                    temperature=0.9,
+                    reasoning_effort="high",
+                ),
+            ),
+        )
+
+    calls_by_model = {kwargs["model"]: kwargs for kwargs in captured_kwargs}
+    assert calls_by_model["model-a"]["temperature"] == 0.1
+    assert calls_by_model["model-a"]["reasoning_effort"] == "low"
+    assert calls_by_model["model-b"]["temperature"] == 0.9
+    assert calls_by_model["model-b"]["reasoning_effort"] == "high"
+    assert result_a.metadata["warnings"] == []
+    assert result_b.metadata["warnings"] == []
+    assert settings.config.temperature == 0.4
+    assert settings.config.reasoning_effort == "medium"
