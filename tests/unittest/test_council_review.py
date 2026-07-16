@@ -285,10 +285,10 @@ def _reset_fake_handler(responses_by_model):
     FakeAiHandler.instances = 0
 
 
-def _runner(config):
+def _runner(config, git_provider=None):
     return CouncilReviewRunner(
         config=config,
-        git_provider=SimpleNamespace(),
+        git_provider=git_provider or SimpleNamespace(),
         token_handler=SimpleNamespace(),
         vars=_base_vars(),
         ai_handler_factory=FakeAiHandler,
@@ -507,6 +507,35 @@ def test_member_and_peer_calls_do_not_use_global_fallback_models(monkeypatch, co
         council_settings.config.fallback_models = original_fallback_models
 
     assert "fallback-model" not in [call["model"] for call in FakeAiHandler.calls]
+
+
+def test_incremental_council_uses_current_scoped_provider_evidence_for_each_member(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    git_provider = SimpleNamespace(incremental=SimpleNamespace(is_incremental=True))
+    evidence = []
+
+    def get_incremental_diff(provider, token_handler, model, **kwargs):
+        assert provider is git_provider
+        assert provider.incremental.is_incremental is True
+        evidence.append((model, f"incremental-diff-for-{model}"))
+        return evidence[-1][1]
+
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", get_incremental_diff)
+    _reset_fake_handler({"member-a": _VALID_REVIEW, "member-b": _VALID_REVIEW, "chair": _VALID_REVIEW})
+
+    asyncio.run(_runner(config, git_provider).run())
+
+    assert evidence == [
+        ("member-a", "incremental-diff-for-member-a"),
+        ("member-b", "incremental-diff-for-member-b"),
+    ]
+    assert "incremental-diff-for-member-a" in FakeAiHandler.calls[0]["user"]
+    assert "incremental-diff-for-member-b" in FakeAiHandler.calls[1]["user"]
 
 
 @pytest.mark.parametrize(
@@ -765,6 +794,8 @@ def _reviewer_for_integration_run():
     reviewer.git_provider = git_provider
     reviewer.pr_url = "https://example/pr/1"
     reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.is_answer = False
+    reviewer.is_auto = False
     reviewer.vars = {}
     reviewer.token_handler = SimpleNamespace()
     reviewer.ai_handler_factory = FakeAiHandler
@@ -807,6 +838,88 @@ async def test_pr_reviewer_runs_standard_review_for_absent_disabled_or_invalid_c
         council_settings.config.publish_output = original_publish_output
 
     standard_review.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pr_reviewer_answer_never_resolves_or_runs_council(monkeypatch, council_settings):
+    original_publish_output = council_settings.config.publish_output
+    council_settings.config.publish_output = False
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    reviewer = _reviewer_for_integration_run()
+    reviewer.is_answer = True
+    reviewer.prediction = _VALID_REVIEW
+    standard_review = AsyncMock()
+    resolve_config = MagicMock(side_effect=AssertionError("answer mode must not resolve Council Review"))
+
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.resolve_council_review_config", resolve_config)
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.CouncilReviewRunner", MagicMock())
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.retry_with_fallback_models", standard_review)
+    try:
+        await reviewer.run()
+    finally:
+        council_settings.config.publish_output = original_publish_output
+
+    resolve_config.assert_not_called()
+    standard_review.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_incremental_eligibility_gate_runs_before_council_selection(monkeypatch):
+    reviewer = _reviewer_for_integration_run()
+    reviewer.incremental = SimpleNamespace(is_incremental=True)
+    reviewer._can_run_incremental_review = MagicMock(return_value=False)
+    resolve_config = MagicMock(side_effect=AssertionError("ineligible incremental review must stop before selection"))
+
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.resolve_council_review_config", resolve_config)
+
+    await reviewer.run()
+
+    reviewer._can_run_incremental_review.assert_called_once_with()
+    resolve_config.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("is_auto", "is_incremental"),
+    [(False, False), (True, False), (False, True)],
+    ids=["manual", "automated", "incremental"],
+)
+async def test_pr_reviewer_runs_council_for_every_review_mode(
+    monkeypatch,
+    council_settings,
+    is_auto,
+    is_incremental,
+):
+    original_publish_output = council_settings.config.publish_output
+    council_settings.config.publish_output = False
+    reviewer = _reviewer_for_integration_run()
+    reviewer.is_auto = is_auto
+    reviewer.incremental = SimpleNamespace(is_incremental=is_incremental)
+    reviewer._can_run_incremental_review = MagicMock(return_value=True)
+    council_config = CouncilReviewConfig(enabled=True)
+    council_result = SimpleNamespace(prediction=_VALID_REVIEW, metadata={"strategy": "council_review"})
+    runner = MagicMock()
+    runner.run = AsyncMock(return_value=council_result)
+    standard_review = AsyncMock()
+
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.resolve_council_review_config", lambda: council_config)
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.CouncilReviewRunner", MagicMock(return_value=runner))
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.retry_with_fallback_models", standard_review)
+    try:
+        await reviewer.run()
+    finally:
+        council_settings.config.publish_output = original_publish_output
+
+    runner.run.assert_awaited_once()
+    standard_review.assert_not_awaited()
+    if is_incremental:
+        reviewer._can_run_incremental_review.assert_called_once_with()
 
 
 @pytest.mark.asyncio

@@ -108,6 +108,31 @@ async def test_handle_request_wrapper_returns_false_on_exception(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["/review", "/review_pr"])
+async def test_handle_request_routes_manual_review_commands_to_reviewer(monkeypatch, command):
+    calls = []
+
+    class FakeReviewer:
+        def __init__(self, pr_url, is_answer=False, is_auto=False, args=None, ai_handler=None):
+            calls.append((pr_url, is_answer, is_auto, args, ai_handler))
+
+        async def run(self):
+            pass
+
+    _patch_request_dependencies(monkeypatch)
+    monkeypatch.setattr(pr_agent_module, "PRReviewer", FakeReviewer)
+    monkeypatch.setitem(pr_agent_module.command2class, "review", FakeReviewer)
+    monkeypatch.setitem(pr_agent_module.command2class, "review_pr", FakeReviewer)
+
+    handled = await pr_agent_module.PRAgent(ai_handler="fake-ai")._handle_request(
+        "https://example/pr/1", command
+    )
+
+    assert handled is True
+    assert calls == [("https://example/pr/1", False, False, [], "fake-ai")]
+
+
+@pytest.mark.asyncio
 async def test_handle_request_answer_uses_reviewer_answer_mode_and_notifies(monkeypatch):
     calls = []
     notify = Mock()
