@@ -43,11 +43,13 @@ class OpenAIHandler(BaseAiHandler):
         stop=stop_after_attempt(OPENAI_RETRIES),
     )
     async def chat_completion(self, model: str, system: str, user: str, temperature: float = 0.2, img_path: str = None):
+        suppress_raw_logging = self.suppress_raw_logging
         try:
             if img_path:
                 get_logger().warning(f"Image path is not supported for OpenAIHandler. Ignoring image path: {img_path}")
-            get_logger().info("System: ", system)
-            get_logger().info("User: ", user)
+            if not suppress_raw_logging:
+                get_logger().info("System: ", system)
+                get_logger().info("User: ", user)
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             client = AsyncOpenAI()
             chat_completion = await client.chat.completions.create(
@@ -58,15 +60,25 @@ class OpenAIHandler(BaseAiHandler):
             resp = chat_completion.choices[0].message.content
             finish_reason = chat_completion.choices[0].finish_reason
             usage = chat_completion.usage
-            get_logger().info("AI response", response=resp, messages=messages, finish_reason=finish_reason,
-                              model=model, usage=usage)
+            if not suppress_raw_logging:
+                get_logger().info("AI response", response=resp, messages=messages, finish_reason=finish_reason,
+                                  model=model, usage=usage)
             return resp, finish_reason
         except openai.RateLimitError as e:
-            get_logger().error(f"Rate limit error during LLM inference: {e}")
+            if suppress_raw_logging:
+                get_logger().error("Rate limit error during LLM inference")
+            else:
+                get_logger().error(f"Rate limit error during LLM inference: {e}")
             raise
         except openai.APIError as e:
-            get_logger().warning(f"Error during LLM inference: {e}")
+            if suppress_raw_logging:
+                get_logger().warning("Error during LLM inference")
+            else:
+                get_logger().warning(f"Error during LLM inference: {e}")
             raise
         except Exception as e:
-            get_logger().warning(f"Unknown error during LLM inference: {e}")
+            if suppress_raw_logging:
+                get_logger().warning("Unknown error during LLM inference")
+            else:
+                get_logger().warning(f"Unknown error during LLM inference: {e}")
             raise openai.APIError from e

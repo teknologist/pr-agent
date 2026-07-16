@@ -286,6 +286,29 @@ def _reset_fake_handler(responses_by_model):
     FakeAiHandler.instances = 0
 
 
+class HandlerManagedTimeoutAiHandler:
+    manages_ai_timeout = True
+
+    def __init__(self):
+        self.main_pr_language = None
+
+    @property
+    def deployment_id(self):
+        return None
+
+    async def chat_completion_with_metadata(
+        self,
+        model,
+        system,
+        user,
+        temperature=None,
+        img_path=None,
+        inference_settings=None,
+    ):
+        await asyncio.sleep(0.02)
+        return SimpleNamespace(response=_VALID_REVIEW, finish_reason="stop", metadata={"warnings": []})
+
+
 class LifecycleAiHandler:
     plans = {}
     events = []
@@ -804,6 +827,28 @@ async def test_parse_failure_records_available_token_usage(monkeypatch, council_
 
 
 @pytest.mark.asyncio
+async def test_runner_preserves_handler_managed_timeout_budget(monkeypatch, council_settings):
+    original_timeout = council_settings.config.ai_timeout
+    council_settings.config.ai_timeout = 0.01
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+
+    try:
+        result = await _runner(config, ai_handler_factory=HandlerManagedTimeoutAiHandler).run()
+    finally:
+        council_settings.config.ai_timeout = original_timeout
+
+    assert result.metadata["successful_member_count"] == 2
+    assert all(call["outcome"] == "success" for call in result.metadata["calls"])
+
+
+@pytest.mark.asyncio
 async def test_member_timeout_is_recorded_and_stage_settles(monkeypatch, council_settings):
     original_timeout = council_settings.config.ai_timeout
     council_settings.config.ai_timeout = 0.01
@@ -1202,6 +1247,8 @@ def test_member_fallback_breaks_top_borda_tie_by_configured_member_order(monkeyp
 )
 def test_exhausted_chairs_without_two_valid_rankings_terminate(monkeypatch, council_settings, peer_responses):
     original_fallback_models = copy.deepcopy(council_settings.config.fallback_models)
+    logger = MagicMock()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_logger", lambda: logger)
     council_settings.config.fallback_models = ["fallback-chair"]
     council_settings.set("pr_council_review", {
         "enabled": True,
@@ -1231,6 +1278,17 @@ def test_exhausted_chairs_without_two_valid_rankings_terminate(monkeypatch, coun
         "chair",
         "fallback-chair",
     ]
+    fallback_event = next(
+        call.kwargs["artifact"]
+        for call in logger.info.call_args_list
+        if call.args[0] == "Council Review fallback evaluated"
+    )
+    assert fallback_event["quorum"] == {"required": 2, "successful": 2, "met": True}
+    assert fallback_event["fallback_decisions"] == {
+        "standard_review": "not_used",
+        "chair_fallback": "exhausted",
+        "member_fallback": "unavailable",
+    }
 
 
 def test_chair_runtime_failure_is_sanitized_for_reviewer_publication(monkeypatch, council_settings):

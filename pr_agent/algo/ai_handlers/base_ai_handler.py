@@ -28,6 +28,9 @@ class BaseAiHandler(ABC):
     This class defines the interface for an AI handler to be used by the PR Agents.
     """
 
+    manages_ai_timeout = False
+    suppress_raw_logging = False
+
     @abstractmethod
     def __init__(self):
         pass

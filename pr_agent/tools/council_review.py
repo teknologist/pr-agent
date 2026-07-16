@@ -267,6 +267,11 @@ class CouncilReviewRunner:
                     )
         except Exception as exc:
             get_logger().warning("Council chair fallback configuration failed")
+            self._log_terminal_fallback_decision(
+                quorum,
+                chair_fallback="configuration_error",
+                member_fallback="not_evaluated",
+            )
             raise CouncilReviewError("Council Review failed during chair synthesis.") from exc
         finally:
             get_settings().set("openai.deployment_id", original_deployment_id)
@@ -275,6 +280,11 @@ class CouncilReviewRunner:
         if chair_response is None:
             member_fallback = _select_member_fallback(successful_reviews, peer_evaluations)
             if member_fallback is None:
+                self._log_terminal_fallback_decision(
+                    quorum,
+                    chair_fallback="exhausted" if len(chair_models) > 1 else "not_configured",
+                    member_fallback="unavailable",
+                )
                 raise CouncilReviewError("Council Review failed during chair synthesis.")
             chair_response = yaml.safe_dump(member_fallback.parsed, sort_keys=False)
             chair_model = None
@@ -428,15 +438,16 @@ class CouncilReviewRunner:
         result = None
         token_usage = None
         try:
-            result = await asyncio.wait_for(
-                self.ai_handler.chat_completion_with_metadata(
-                    model=participant.model,
-                    system=system_prompt,
-                    user=user_prompt,
-                    inference_settings=participant.inference_settings,
-                ),
-                timeout=get_settings().config.ai_timeout,
+            completion = self.ai_handler.chat_completion_with_metadata(
+                model=participant.model,
+                system=system_prompt,
+                user=user_prompt,
+                inference_settings=participant.inference_settings,
             )
+            if getattr(self.ai_handler, "manages_ai_timeout", False):
+                result = await completion
+            else:
+                result = await asyncio.wait_for(completion, timeout=get_settings().config.ai_timeout)
             result_metadata = result.metadata or {}
             token_usage = result_metadata.get("token_usage", result_metadata.get("usage"))
             parsed = parse_response(result.response)
@@ -474,6 +485,27 @@ class CouncilReviewRunner:
             metadata["token_usage"] = token_usage
         self.call_metadata.append(metadata)
         get_logger().info("Council Review call completed", artifact=metadata)
+
+    @staticmethod
+    def _log_terminal_fallback_decision(
+        quorum: dict[str, Any],
+        *,
+        chair_fallback: str,
+        member_fallback: str,
+    ) -> None:
+        get_logger().info(
+            "Council Review fallback evaluated",
+            artifact={
+                "strategy": "council_review",
+                "stage": "chair_synthesis",
+                "quorum": quorum,
+                "fallback_decisions": {
+                    "standard_review": "not_used",
+                    "chair_fallback": chair_fallback,
+                    "member_fallback": member_fallback,
+                },
+            },
+        )
 
     def _new_handler(self) -> BaseAiHandler:
         handler = self.ai_handler_factory()

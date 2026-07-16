@@ -35,6 +35,8 @@ class LiteLLMAIHandler(BaseAiHandler):
     and provides a method for performing chat completions using the OpenAI ChatCompletion API.
     """
 
+    manages_ai_timeout = True
+
     def __init__(self):
         """
         Initializes the OpenAI API key and other settings from a configuration file.
