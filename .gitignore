@@ -18,3 +18,5 @@ poetry.lock
 .log
 
 graphify-out/
+/.pi/addy-workflow/state
+/.pi/input-history.jsonl
