@@ -51,6 +51,48 @@ extra_instructions = "..."
 
 ## Configuration options
 
+### Council Review
+
+Council Review runs several independent Review passes and asks a chair model to synthesize their structured results. It is **disabled by default**, so the `review` tool uses Standard Review unless an applicable settings layer enables it. A repository may opt in by adding this minimal section to its `.pr_agent.toml`:
+
+```toml
+[pr_council_review]
+enabled = true
+peer_evaluation = true
+members = [
+    { model = "provider/member-a", temperature = 0.2 },
+    { model = "provider/member-b", reasoning_effort = "high" },
+]
+chair = { model = "provider/chair", temperature = 0.1, reasoning_effort = "medium" }
+```
+
+`members` must contain between 2 and 5 entries. Every member and the `chair` require a `model`. `temperature` and `reasoning_effort` are optional per-role inference overrides: temperature accepts values from 0 through 2, and reasoning effort accepts `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Unsupported handler-level overrides are ignored with a sanitized notice. Set `peer_evaluation = false` to skip Peer Evaluation and send the independent member reviews directly to the chair.
+
+Council-specific entries select models and their supported inference overrides only. Credentials and AI timeouts are inherited from the normal `[config]` settings. The `[pr_council_review]` section follows the same [settings-layer precedence](../usage-guide/configuration_options.md#precedence) as other PR-Agent configuration: repository `.pr_agent.toml` values can override global defaults, while wiki and environment settings can override repository values.
+
+Invalid enabled Council Review configuration produces a visible notice and falls back to Standard Review. A runtime Council Review failure does not publish a partial member response or silently rerun Standard Review.
+
+#### Council Review prompts
+
+Independent members use the existing Standard Review system and user prompts from `pr_agent/settings/pr_reviewer_prompts.toml`, so the normal `[pr_review_prompt]` overrides also apply to member reviews.
+
+Peer Evaluation and chair synthesis use the overrideable `[pr_council_review_prompt]` section from `pr_agent/settings/pr_council_review_prompts.toml`:
+
+- `peer_system` and `peer_user` rank anonymized structured member responses without the raw PR diff or model identities. `peer_user` receives `member_review_count` and `member_reviews`.
+- `system` and `user` synthesize successful member reviews and available peer evaluations into the same structured YAML contract as Standard Review. `user` receives `member_review_count`, `member_reviews`, `peer_evaluation_count`, and `peer_evaluations`.
+
+Override these prompt keys through the same settings layers as other prompts. Prompt rendering uses strict undefined-variable checks, so custom templates may reference only the variables available to their section.
+
+#### Regression verification
+
+The focused regression suite uses fake AI handlers and git providers; it does not call live models or require provider credentials:
+
+```bash
+PYTHONPATH=. uv run --python 3.12 --with-requirements requirements.txt --with-requirements requirements-dev.txt pytest tests/unittest/test_council_review.py -v
+```
+
+It covers Council Review configuration, execution stages, quorum and fallbacks, warnings, manual/automated/incremental Review modes, cancellation, and information-disclosure boundaries. Run the existing Standard Review and routing suites as part of the full unit suite before release.
+
 ???+ example "General options"
 
     <table>
