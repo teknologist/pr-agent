@@ -166,9 +166,9 @@ class PRReviewer:
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
                 self.git_provider.publish_comment("Preparing review...", is_temporary=True)
 
-            council_config = resolve_council_review_config()
+            council_config = None if self.is_answer else resolve_council_review_config()
             self.council_review_metadata = {}
-            if council_config.enabled:
+            if council_config and council_config.enabled:
                 try:
                     council_result = await CouncilReviewRunner(
                         config=council_config,
@@ -187,7 +187,7 @@ class PRReviewer:
                         self.git_provider.publish_comment(e.public_message)
                     return None
             else:
-                self.council_review_metadata = {"warnings": council_config.warnings}
+                self.council_review_metadata = {"warnings": council_config.warnings if council_config else []}
                 await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
 
             if not self.prediction:
