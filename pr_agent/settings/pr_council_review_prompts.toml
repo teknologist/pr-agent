@@ -7,10 +7,9 @@ Return YAML with this exact structure:
 
 peer_evaluation:
   ranking:
-    - response_1
-    - response_2
+    - <response label, strongest first>
   rationale: |
-    Briefly explain the relative quality of the responses.
+    Briefly explain the relative quality of all responses.
 """
 
 peer_user="""

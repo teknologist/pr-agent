@@ -387,6 +387,36 @@ def test_peer_evaluations_are_anonymized_concurrent_and_available_to_chair(monke
     assert result.metadata["failed_peer_evaluation_count"] == 0
 
 
+def test_all_configured_members_evaluate_gapped_anonymous_success_labels(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}, {"model": "member-c"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    peer_evaluation = _VALID_PEER_EVALUATION.replace("response_2", "response_3")
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": "not yaml: [",
+        "member-c": _VALID_REVIEW,
+        "member-a:peer": peer_evaluation,
+        "member-b:peer": peer_evaluation,
+        "member-c:peer": peer_evaluation,
+        "chair": _VALID_REVIEW,
+    })
+
+    result = asyncio.run(_runner(config).run())
+
+    peer_calls = [call for call in FakeAiHandler.calls if call["stage"] == "peer"]
+    assert [call["model"] for call in peer_calls] == ["member-a", "member-b", "member-c"]
+    assert all("response_1" in call["user"] and "response_3" in call["user"] for call in peer_calls)
+    assert all("response_2" not in call["user"] for call in peer_calls)
+    assert result.metadata["successful_member_count"] == 2
+    assert result.metadata["successful_peer_evaluation_count"] == 3
+
+
 @pytest.mark.parametrize(
     ("peer_a", "peer_b", "successful_count", "failed_count"),
     [
