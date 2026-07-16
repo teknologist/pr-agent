@@ -28,6 +28,17 @@ class BaseAiHandler(ABC):
     This class defines the interface for an AI handler to be used by the PR Agents.
     """
 
+    manages_ai_timeout = False
+    supports_council_redaction = False
+    suppress_raw_logging = False
+
+    def enable_council_redaction(self) -> bool:
+        """Enable request-content redaction when this handler can guarantee it."""
+        if not self.supports_council_redaction:
+            return False
+        self.suppress_raw_logging = True
+        return True
+
     @abstractmethod
     def __init__(self):
         pass

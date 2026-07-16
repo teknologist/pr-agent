@@ -68,6 +68,7 @@ class LangChainOpenAIHandler(BaseAiHandler):
         stop=stop_after_attempt(OPENAI_RETRIES),
     )
     async def chat_completion(self, model: str, system: str, user: str, temperature: float = 0.2, img_path: str = None):
+        suppress_raw_logging = self.suppress_raw_logging
         if img_path:
             get_logger().warning(f"Image path is not supported for LangChainOpenAIHandler. Ignoring image path: {img_path}")
         try:
@@ -101,11 +102,20 @@ class LangChainOpenAIHandler(BaseAiHandler):
             return resp.content, finish_reason
 
         except openai.RateLimitError as e:
-            get_logger().error(f"Rate limit error during LLM inference: {e}")
+            if suppress_raw_logging:
+                get_logger().error("Rate limit error during LLM inference")
+            else:
+                get_logger().error(f"Rate limit error during LLM inference: {e}")
             raise
         except openai.APIError as e:
-            get_logger().warning(f"Error during LLM inference: {e}")
+            if suppress_raw_logging:
+                get_logger().warning("Error during LLM inference")
+            else:
+                get_logger().warning(f"Error during LLM inference: {e}")
             raise
         except Exception as e:
-            get_logger().warning(f"Unknown error during LLM inference: {e}")
+            if suppress_raw_logging:
+                get_logger().warning("Unknown error during LLM inference")
+            else:
+                get_logger().warning(f"Unknown error during LLM inference: {e}")
             raise openai.APIError from e
