@@ -208,6 +208,7 @@ class CouncilReviewRunner:
         self.main_language = main_language
         self.ai_handler = self._new_handler()
         self.call_metadata: list[dict[str, Any]] = []
+        self.warnings: list[dict[str, str]] = []
 
     async def run(self) -> CouncilReviewResult:
         member_results = await self._run_stage([
@@ -250,7 +251,6 @@ class CouncilReviewRunner:
                     peer_evaluations.append(result)
 
         chair_response = None
-        chair_metadata = {}
         chair_model = None
         chair_models = [self.config.chair.model, *_get_fallback_models()]
         original_deployment_id = get_settings().get("openai.deployment_id", None)
@@ -259,7 +259,7 @@ class CouncilReviewRunner:
             for model, deployment_id in chair_attempts:
                 try:
                     get_settings().set("openai.deployment_id", deployment_id)
-                    chair_response, chair_metadata = await self._run_chair(
+                    chair_response, _ = await self._run_chair(
                         model,
                         successful_reviews,
                         peer_evaluations,
@@ -269,7 +269,7 @@ class CouncilReviewRunner:
                 except Exception:
                     get_logger().warning(
                         "Council chair synthesis failed",
-                        artifact={"model": model},
+                        artifact={"strategy": "council_review", "stage": "chair_synthesis"},
                     )
         except Exception as exc:
             get_logger().warning("Council chair fallback configuration failed")
@@ -322,7 +322,7 @@ class CouncilReviewRunner:
                 "member_fallback": "used" if synthesis_strategy == "member_fallback" else "not_used",
             },
             "calls": list(self.call_metadata),
-            "warnings": chair_metadata.get("warnings", []),
+            "warnings": list(self.warnings),
         }
         return CouncilReviewResult(prediction=chair_response, metadata=metadata)
 
@@ -456,6 +456,7 @@ class CouncilReviewRunner:
                 result = await asyncio.wait_for(completion, timeout=get_settings().config.ai_timeout)
             result_metadata = result.metadata or {}
             token_usage = _normalize_token_usage(result_metadata.get("token_usage", result_metadata.get("usage")))
+            self._record_warnings(stage, result_metadata.get("warnings", []))
             parsed = parse_response(result.response)
         except asyncio.TimeoutError:
             self._record_call(stage, role, participant.model, started_at, "timeout", token_usage)
@@ -483,14 +484,31 @@ class CouncilReviewRunner:
             "strategy": "council_review",
             "stage": stage,
             "role": role,
-            "model": model,
             "duration_ms": round((asyncio.get_running_loop().time() - started_at) * 1000, 3),
             "outcome": outcome,
         }
+        if outcome == "success":
+            metadata["model"] = model
         if token_usage is not None:
             metadata["token_usage"] = token_usage
         self.call_metadata.append(metadata)
         get_logger().info("Council Review call completed", artifact=metadata)
+
+    def _record_warnings(self, stage: str, warnings: Any) -> None:
+        for warning in warnings if isinstance(warnings, list) else []:
+            if not isinstance(warning, dict) or warning.get("code") != "unsupported_inference_setting":
+                continue
+            sanitized_warning = {"code": "unsupported_inference_setting"}
+            if sanitized_warning not in self.warnings:
+                self.warnings.append(sanitized_warning)
+            get_logger().warning(
+                "Council Review ignored an unsupported inference override",
+                artifact={
+                    "strategy": "council_review",
+                    "stage": stage,
+                    "warning_code": "unsupported_inference_setting",
+                },
+            )
 
     @staticmethod
     def _log_terminal_fallback_decision(
@@ -504,7 +522,7 @@ class CouncilReviewRunner:
             artifact={
                 "strategy": "council_review",
                 "stage": "chair_synthesis",
-                "quorum": quorum,
+                "quorum_met": quorum["met"],
                 "fallback_decisions": {
                     "standard_review": "not_used",
                     "chair_fallback": chair_fallback,
