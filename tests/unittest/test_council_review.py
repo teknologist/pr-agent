@@ -759,6 +759,8 @@ def test_malformed_member_does_not_count_toward_quorum_but_successful_reviews_go
     ],
 )
 def test_structurally_invalid_member_does_not_count_toward_quorum(monkeypatch, council_settings, invalid_review):
+    logger = MagicMock()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_logger", lambda: logger)
     council_settings.set("pr_council_review", {
         "enabled": True,
         "peer_evaluation": False,
@@ -773,6 +775,16 @@ def test_structurally_invalid_member_does_not_count_toward_quorum(monkeypatch, c
         asyncio.run(_runner(config).run())
 
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b"]
+    fallback_event = next(
+        call.kwargs["artifact"]
+        for call in logger.info.call_args_list
+        if call.args[0] == "Council Review fallback evaluated"
+    )
+    assert fallback_event["fallback_decisions"] == {
+        "standard_review": "not_used",
+        "chair_fallback": "not_evaluated",
+        "member_fallback": "not_evaluated",
+    }
 
 
 @pytest.mark.asyncio
@@ -1048,6 +1060,32 @@ def test_council_logs_and_metadata_exclude_raw_outputs(monkeypatch, council_sett
     }
     assert all({"strategy", "stage", "role", "model", "duration_ms", "outcome"} <= set(call)
                for call in result.metadata["calls"])
+
+
+def test_malformed_member_output_is_redacted_from_parser_logs(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}, {"model": "member-c"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    logger = MagicMock()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_logger", lambda: logger)
+    monkeypatch.setattr("pr_agent.algo.utils.get_logger", lambda: logger)
+    secret = "raw member prompt echoed into malformed output"
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": f"review: [ {secret}",
+        "member-c": _VALID_REVIEW,
+        "chair": _VALID_REVIEW,
+    })
+
+    result = asyncio.run(_runner(config).run())
+
+    assert result.metadata["successful_member_count"] == 2
+    assert secret not in repr(logger.mock_calls)
 
 
 def test_numeric_and_boolean_standard_review_scalars_are_normalized(monkeypatch, council_settings):

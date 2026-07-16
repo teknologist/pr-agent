@@ -749,20 +749,34 @@ def _fix_key_value(key: str, value: str):
     return key, value
 
 
-def load_yaml(response_text: str, keys_fix_yaml: List[str] = [], first_key="", last_key="") -> dict:
+def load_yaml(
+    response_text: str,
+    keys_fix_yaml: List[str] = [],
+    first_key="",
+    last_key="",
+    suppress_raw_logging: bool = False,
+) -> dict:
     response_text_original = copy.deepcopy(response_text)
     response_text = response_text.strip('\n').removeprefix('yaml').removeprefix('```yaml').rstrip().removesuffix('```')
     try:
         data = yaml.safe_load(response_text)
     except Exception as e:
-        get_logger().warning(f"Initial failure to parse AI prediction: {e}")
+        if suppress_raw_logging:
+            get_logger().warning("Initial failure to parse AI prediction")
+        else:
+            get_logger().warning(f"Initial failure to parse AI prediction: {e}")
         data = try_fix_yaml(response_text, keys_fix_yaml=keys_fix_yaml, first_key=first_key, last_key=last_key,
                             response_text_original=response_text_original)
         if not data:
-            get_logger().error(f"Failed to parse AI prediction after fallbacks",
-                               artifact={'response_text': response_text})
+            if suppress_raw_logging:
+                get_logger().error("Failed to parse AI prediction after fallbacks")
+            else:
+                get_logger().error("Failed to parse AI prediction after fallbacks",
+                                   artifact={'response_text': response_text})
+        elif suppress_raw_logging:
+            get_logger().info("Successfully parsed AI prediction after fallbacks")
         else:
-            get_logger().info(f"Successfully parsed AI prediction after fallbacks",
+            get_logger().info("Successfully parsed AI prediction after fallbacks",
                               artifact={'response_text': response_text})
     return data
 

@@ -227,6 +227,11 @@ class CouncilReviewRunner:
             artifact={"strategy": "council_review", "stage": "independent_review", "quorum": quorum},
         )
         if not quorum["met"]:
+            self._log_terminal_fallback_decision(
+                quorum,
+                chair_fallback="not_evaluated",
+                member_fallback="not_evaluated",
+            )
             raise CouncilReviewError("Council Review failed because fewer than two members returned parseable reviews.")
 
         peer_evaluations = []
@@ -549,6 +554,7 @@ def _parse_review_prediction(response: str, variables: dict[str, Any]) -> dict[s
         keys_fix_yaml=_REVIEW_KEYS_FIX_YAML,
         first_key="review",
         last_key="security_concerns",
+        suppress_raw_logging=True,
     )
     if not isinstance(data, dict) or not isinstance(data.get("review"), dict):
         raise CouncilReviewError("Council participant returned an unparseable structured Review result")
