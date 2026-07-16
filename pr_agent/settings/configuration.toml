@@ -116,7 +116,7 @@ peer_evaluation=true
 # Configure 2-5 members. Each entry requires model and may override temperature and reasoning_effort.
 members=[]
 # The chair entry requires model and may override temperature and reasoning_effort.
-# Credentials and timeouts continue to come from the normal [config] settings.
+# Credentials use existing provider settings and .secrets.toml; timeouts use [config].ai_timeout.
 chair={}
 
 [pr_description] # /describe #
