@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -44,17 +45,24 @@ _REVIEW_KEY_ORDER = [
     "todo_sections",
     "can_be_split",
 ]
-_KEY_ISSUE_KEYS = {"relevant_file", "issue_header", "issue_content", "start_line", "end_line"}
-_TICKET_COMPLIANCE_KEYS = {
-    "ticket_url",
-    "ticket_requirements",
-    "fully_compliant_requirements",
-    "not_compliant_requirements",
-    "requires_further_human_verification",
+_KEY_ISSUE_SCHEMA = {
+    "relevant_file": str,
+    "issue_header": str,
+    "issue_content": str,
+    "start_line": int,
+    "end_line": int,
 }
-_CONTRIBUTION_TIME_COST_KEYS = {"best_case", "average_case", "worst_case"}
-_TODO_SECTION_KEYS = {"relevant_file", "line_number", "content"}
-_SUB_PR_KEYS = {"relevant_files", "title"}
+_TICKET_COMPLIANCE_SCHEMA = {
+    "ticket_url": str,
+    "ticket_requirements": str,
+    "fully_compliant_requirements": str,
+    "not_compliant_requirements": str,
+    "requires_further_human_verification": str,
+}
+_CONTRIBUTION_TIME_COST_SCHEMA = {"best_case": str, "average_case": str, "worst_case": str}
+_TODO_SECTION_SCHEMA = {"relevant_file": str, "line_number": int, "content": str}
+_SUB_PR_SCHEMA = {"relevant_files": list, "title": str}
+_NUMBERED_DIFF_LINE = re.compile(r"^\d+\s+[ +\-](.*)$")
 
 
 @dataclass(frozen=True)
@@ -179,6 +187,7 @@ class CouncilReviewRunner:
         self.vars = vars
         self.ai_handler_factory = ai_handler_factory
         self.main_language = main_language
+        self.ai_handler = self._new_handler()
 
     async def run(self) -> CouncilReviewResult:
         member_results = await asyncio.gather(
@@ -188,7 +197,7 @@ class CouncilReviewRunner:
         successful_reviews = []
         failed_members = 0
         for result in member_results:
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 failed_members += 1
                 get_logger().warning("Council member review failed", artifact={"error": str(result)})
             else:
@@ -223,8 +232,7 @@ class CouncilReviewRunner:
         variables["diff"] = patches_diff
         system_prompt = _render_prompt(get_settings().pr_review_prompt.system, variables)
         user_prompt = _render_prompt(get_settings().pr_review_prompt.user, variables)
-        handler = self._new_handler()
-        result = await handler.chat_completion_with_metadata(
+        result = await self.ai_handler.chat_completion_with_metadata(
             model=member.model,
             system=system_prompt,
             user=user_prompt,
@@ -249,15 +257,14 @@ class CouncilReviewRunner:
         variables.pop("diff", None)
         system_prompt = _render_prompt(get_settings().pr_council_review_prompt.system, variables)
         user_prompt = _render_prompt(get_settings().pr_council_review_prompt.user, variables)
-        handler = self._new_handler()
-        result = await handler.chat_completion_with_metadata(
+        result = await self.ai_handler.chat_completion_with_metadata(
             model=self.config.chair.model,
             system=system_prompt,
             user=user_prompt,
             inference_settings=self.config.chair.inference_settings,
         )
-        _parse_review_prediction(result.response, variables)
-        return result.response, result.metadata
+        parsed = _parse_review_prediction(result.response, variables)
+        return yaml.safe_dump(parsed, sort_keys=False), result.metadata
 
     def _new_handler(self) -> BaseAiHandler:
         handler = self.ai_handler_factory()
@@ -322,22 +329,18 @@ def _validate_and_project_review(review: dict[str, Any], variables: dict[str, An
 
 def _validate_review_value(key: str, value: Any) -> Any:
     if key == "key_issues_to_review":
-        _validate_list_of_dicts(value, _KEY_ISSUE_KEYS, key)
-    elif key == "ticket_compliance_check":
-        _validate_list_of_dicts(value, _TICKET_COMPLIANCE_KEYS, key)
-    elif key == "contribution_time_cost_estimate":
-        _validate_dict(value, _CONTRIBUTION_TIME_COST_KEYS, key)
-    elif key == "todo_sections":
+        return _validate_list_of_dicts(value, _KEY_ISSUE_SCHEMA, key)
+    if key == "ticket_compliance_check":
+        return _validate_list_of_dicts(value, _TICKET_COMPLIANCE_SCHEMA, key)
+    if key == "contribution_time_cost_estimate":
+        return _validate_dict(value, _CONTRIBUTION_TIME_COST_SCHEMA, key)
+    if key == "todo_sections":
         if isinstance(value, str):
             return value
-        _validate_list_of_dicts(value, _TODO_SECTION_KEYS, key)
-    elif key == "can_be_split":
-        _validate_list_of_dicts(value, _SUB_PR_KEYS, key)
-        for item in value:
-            relevant_files = item["relevant_files"]
-            if not isinstance(relevant_files, list) or not all(isinstance(file, str) for file in relevant_files):
-                raise CouncilReviewError("Council participant returned an invalid structured Review result")
-    elif key in {"relevant_tests", "security_concerns"}:
+        return _validate_list_of_dicts(value, _TODO_SECTION_SCHEMA, key)
+    if key == "can_be_split":
+        return _validate_list_of_dicts(value, _SUB_PR_SCHEMA, key)
+    if key in {"relevant_tests", "security_concerns"}:
         if isinstance(value, bool):
             return "Yes" if value else "No"
         if not isinstance(value, str):
@@ -368,41 +371,64 @@ def _validate_review_value(key: str, value: Any) -> Any:
     return value
 
 
-def _validate_list_of_dicts(value: Any, expected_keys: set[str], location: str) -> None:
+def _validate_list_of_dicts(
+    value: Any,
+    schema: dict[str, type],
+    location: str,
+) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         raise CouncilReviewError("Council participant returned an invalid structured Review result")
-    for item in value:
-        _validate_dict(item, expected_keys, location)
+    return [_validate_dict(item, schema, location) for item in value]
 
 
-def _validate_dict(value: Any, expected_keys: set[str], location: str) -> None:
+def _validate_dict(value: Any, schema: dict[str, type], location: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise CouncilReviewError("Council participant returned an invalid structured Review result")
-    if set(value) != expected_keys:
+    if set(value) != set(schema):
         raise CouncilReviewError(f"Council participant returned invalid structured Review fields for {location}")
-    for item_value in value.values():
-        if not isinstance(item_value, (int, str, list)):
+
+    normalized = {}
+    for field_name, expected_type in schema.items():
+        field_value = value[field_name]
+        if expected_type is int:
+            if isinstance(field_value, bool) or not isinstance(field_value, (int, str)):
+                raise CouncilReviewError("Council participant returned an invalid structured Review result")
+            try:
+                field_value = int(field_value)
+            except ValueError as exc:
+                raise CouncilReviewError("Council participant returned an invalid structured Review result") from exc
+        elif expected_type is list:
+            if not isinstance(field_value, list) or not all(isinstance(item, str) for item in field_value):
+                raise CouncilReviewError("Council participant returned an invalid structured Review result")
+        elif not isinstance(field_value, expected_type):
             raise CouncilReviewError("Council participant returned an invalid structured Review result")
+        normalized[field_name] = field_value
+    return normalized
 
 
 def _format_member_reviews(member_reviews: list[CouncilMemberReview]) -> str:
     rendered_reviews = []
     for index, review in enumerate(member_reviews, start=1):
-        normalized_review = yaml.safe_dump(review.parsed, sort_keys=False)
-        redacted_review = _redact_diff_content(normalized_review, review.source_diff)
-        rendered_reviews.append(f"Member Review {index}:\n```yaml\n{redacted_review.strip()}\n```")
+        redacted_review = _redact_review_data(review.parsed, review.source_diff)
+        normalized_review = yaml.safe_dump(redacted_review, sort_keys=False)
+        rendered_reviews.append(f"Member Review {index}:\n```yaml\n{normalized_review.strip()}\n```")
     return "\n\n".join(rendered_reviews)
 
 
-def _redact_diff_content(review_text: str, source_diff: str) -> str:
-    if not source_diff:
-        return review_text
+def _redact_review_data(value: Any, source_diff: str) -> Any:
+    if isinstance(value, dict):
+        return {key: _redact_review_data(item, source_diff) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_review_data(item, source_diff) for item in value]
+    if not isinstance(value, str) or not source_diff:
+        return value
 
-    redacted_text = review_text.replace(source_diff, "[redacted raw diff]")
+    redacted_value = value.replace(source_diff, "[redacted raw diff]")
     for line in source_diff.splitlines():
         stripped_line = line.strip()
-        diff_payload = stripped_line.lstrip("+- ")
+        numbered_match = _NUMBERED_DIFF_LINE.match(stripped_line)
+        diff_payload = numbered_match.group(1).strip() if numbered_match else stripped_line.lstrip("+- ").strip()
         for sensitive_text in {stripped_line, diff_payload}:
             if len(sensitive_text) >= 3:
-                redacted_text = redacted_text.replace(sensitive_text, "[redacted diff line]")
-    return redacted_text
+                redacted_value = redacted_value.replace(sensitive_text, "[redacted diff line]")
+    return redacted_value

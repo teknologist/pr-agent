@@ -1,15 +1,19 @@
 import asyncio
 import copy
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 
 from pr_agent.config_loader import get_settings
 from pr_agent.tools.council_review import (
+    CouncilReviewConfig,
     CouncilReviewError,
     CouncilReviewRunner,
     resolve_council_review_config,
 )
+from pr_agent.tools.pr_reviewer import PRReviewer
 
 _VALID_REVIEW = """review:
   relevant_tests: |
@@ -36,6 +40,10 @@ _VALID_REVIEW_WITH_FINDING = """review:
 """
 
 _VALID_REVIEW_WITH_SHORT_DIFF_FINDING = _VALID_REVIEW_WITH_FINDING.replace("raw diff with secret line", "secret")
+_VALID_REVIEW_WITH_NUMBERED_DIFF_FINDING = _VALID_REVIEW_WITH_FINDING.replace(
+    "raw diff with secret line",
+    "API_KEY = 'topsecret'",
+)
 
 
 def _base_vars():
@@ -177,8 +185,10 @@ class FakeAiHandler:
     calls = []
     active_calls = 0
     max_active_calls = 0
+    instances = 0
 
     def __init__(self):
+        FakeAiHandler.instances += 1
         self.main_pr_language = None
 
     @property
@@ -208,6 +218,8 @@ class FakeAiHandler:
         await asyncio.sleep(0.01)
         FakeAiHandler.active_calls -= 1
         response = FakeAiHandler.responses_by_model[model]
+        if isinstance(response, BaseException):
+            raise response
         return SimpleNamespace(response=response, finish_reason="stop", metadata={"warnings": []})
 
 
@@ -216,6 +228,7 @@ def _reset_fake_handler(responses_by_model):
     FakeAiHandler.calls = []
     FakeAiHandler.active_calls = 0
     FakeAiHandler.max_active_calls = 0
+    FakeAiHandler.instances = 0
 
 
 def _runner(config):
@@ -246,12 +259,16 @@ def test_successful_council_uses_member_models_model_specific_diffs_and_returns_
 
     result = asyncio.run(_runner(config).run())
 
-    assert result.prediction == _VALID_REVIEW
+    parsed_prediction = yaml.safe_load(result.prediction)
+    assert parsed_prediction["review"]["key_issues_to_review"] == []
+    assert parsed_prediction["review"]["relevant_tests"].strip() == "Yes"
+    assert parsed_prediction["review"]["security_concerns"].strip() == "No"
     assert result.metadata["strategy"] == "council_review"
     assert result.metadata["successful_member_count"] == 2
     assert diff_models == ["member-a", "member-b"]
     assert FakeAiHandler.max_active_calls > 1
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b", "chair"]
+    assert FakeAiHandler.instances == 1
     assert "diff-for-member-a" in FakeAiHandler.calls[0]["user"]
     assert "diff-for-member-b" in FakeAiHandler.calls[1]["user"]
     assert "raw diff" not in FakeAiHandler.calls[-1]["user"]
@@ -262,6 +279,7 @@ def test_successful_council_uses_member_models_model_specific_diffs_and_returns_
     [
         ("raw diff with secret line", _VALID_REVIEW_WITH_FINDING, "raw diff with secret line"),
         ("+secret", _VALID_REVIEW_WITH_SHORT_DIFF_FINDING, "secret"),
+        ("12 +API_KEY = 'topsecret'", _VALID_REVIEW_WITH_NUMBERED_DIFF_FINDING, "API_KEY = 'topsecret'"),
     ],
 )
 def test_member_review_diff_content_is_redacted_before_chair(
@@ -334,6 +352,18 @@ def test_malformed_member_does_not_count_toward_quorum_but_successful_reviews_go
         """review:
   relevant_tests: |
     Yes
+  key_issues_to_review:
+  - relevant_file: council_review.py
+    issue_header: Invalid line
+    issue_content: start_line must be an integer
+    start_line: []
+    end_line: 1
+  security_concerns: |
+    No
+""",
+        """review:
+  relevant_tests: |
+    Yes
   key_issues_to_review: []
   security_concerns: |
     No
@@ -356,6 +386,28 @@ def test_structurally_invalid_member_does_not_count_toward_quorum(monkeypatch, c
         asyncio.run(_runner(config).run())
 
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b"]
+
+
+def test_cancelled_member_is_a_failed_result_and_does_not_corrupt_quorum(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}, {"model": "member-c"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": asyncio.CancelledError(),
+        "member-c": _VALID_REVIEW,
+        "chair": _VALID_REVIEW,
+    })
+
+    result = asyncio.run(_runner(config).run())
+
+    assert result.metadata["successful_member_count"] == 2
+    assert result.metadata["failed_member_count"] == 1
+    assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b", "member-c", "chair"]
 
 
 def test_numeric_and_boolean_standard_review_scalars_are_normalized(monkeypatch, council_settings):
@@ -387,7 +439,12 @@ def test_numeric_and_boolean_standard_review_scalars_are_normalized(monkeypatch,
         main_language="Python",
     ).run())
 
+    parsed_prediction = yaml.safe_load(result.prediction)
     assert result.metadata["successful_member_count"] == 2
+    assert parsed_prediction["review"]["estimated_effort_to_review_[1-5]"] == 3
+    assert parsed_prediction["review"]["score"] == "89"
+    assert parsed_prediction["review"]["relevant_tests"] == "Yes"
+    assert parsed_prediction["review"]["security_concerns"] == "No"
 
 
 def test_optional_prompt_fields_are_required_when_enabled(monkeypatch, council_settings):
@@ -415,6 +472,13 @@ def test_optional_prompt_fields_are_required_when_enabled(monkeypatch, council_s
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b"]
 
 
+def test_ticket_prompt_examples_match_the_structured_review_schema():
+    prompt = get_settings().pr_review_prompt.system + get_settings().pr_review_prompt.user
+
+    assert "overall_compliance_level" not in prompt
+    assert prompt.count("requires_further_human_verification") == 3
+
+
 def test_no_quorum_raises_without_chair_or_standard_review_fallback(monkeypatch, council_settings):
     council_settings.set("pr_council_review", {
         "enabled": True,
@@ -429,3 +493,86 @@ def test_no_quorum_raises_without_chair_or_standard_review_fallback(monkeypatch,
         asyncio.run(_runner(config).run())
 
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b"]
+
+
+def _reviewer_for_integration_run():
+    git_provider = MagicMock()
+    git_provider.get_files.return_value = [SimpleNamespace(filename="changed.py")]
+    reviewer = PRReviewer.__new__(PRReviewer)
+    reviewer.git_provider = git_provider
+    reviewer.pr_url = "https://example/pr/1"
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.vars = {}
+    reviewer.token_handler = SimpleNamespace()
+    reviewer.ai_handler_factory = FakeAiHandler
+    reviewer.main_language = "Python"
+    reviewer.prediction = None
+    reviewer._prepare_pr_review = MagicMock(return_value="prepared review")
+    reviewer._should_publish_review_no_suggestions = MagicMock(return_value=False)
+    return reviewer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "section",
+    [
+        {},
+        {"enabled": False},
+        {"enabled": True, "members": [], "chair": {"model": "chair"}},
+    ],
+)
+async def test_pr_reviewer_runs_standard_review_for_absent_disabled_or_invalid_config(
+    monkeypatch,
+    council_settings,
+    section,
+):
+    original_publish_output = council_settings.config.publish_output
+    council_settings.config.publish_output = False
+    council_settings.set("pr_council_review", section)
+    reviewer = _reviewer_for_integration_run()
+    standard_review = AsyncMock()
+
+    async def run_standard_review(*args, **kwargs):
+        reviewer.prediction = _VALID_REVIEW
+        await standard_review(*args, **kwargs)
+
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.retry_with_fallback_models", run_standard_review)
+    try:
+        await reviewer.run()
+    finally:
+        council_settings.config.publish_output = original_publish_output
+
+    standard_review.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pr_reviewer_runtime_no_quorum_does_not_run_standard_review_or_publish_member_result(
+    monkeypatch,
+    council_settings,
+):
+    original_publish_output = council_settings.config.publish_output
+    original_is_auto_command = council_settings.config.get("is_auto_command", False)
+    council_settings.config.publish_output = True
+    council_settings.config.is_auto_command = False
+    reviewer = _reviewer_for_integration_run()
+    council_config = CouncilReviewConfig(enabled=True)
+    standard_review = AsyncMock()
+    runner = MagicMock()
+    runner.run = AsyncMock(side_effect=CouncilReviewError("Council Review failed: no quorum"))
+
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.resolve_council_review_config", lambda: council_config)
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.CouncilReviewRunner", MagicMock(return_value=runner))
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.retry_with_fallback_models", standard_review)
+    try:
+        await reviewer.run()
+    finally:
+        council_settings.config.publish_output = original_publish_output
+        council_settings.config.is_auto_command = original_is_auto_command
+
+    standard_review.assert_not_awaited()
+    assert reviewer.git_provider.publish_comment.call_args_list == [
+        (("Preparing review...",), {"is_temporary": True}),
+        (("Council Review failed: no quorum",), {}),
+    ]
