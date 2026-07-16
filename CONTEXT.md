@@ -35,3 +35,7 @@ The reviewer responsible for synthesizing Council Members’ work into the final
 ## Member Fallback
 
 A recovery outcome used when the Council Chair fails: the highest peer-ranked Council Member’s Review becomes the final Review. If no valid ranking exists, no Member Fallback is possible.
+
+## Council Failure
+
+A Council Review outcome in which no Review is produced because Council Quorum was not reached or no valid final Review could be selected after synthesis failure.
