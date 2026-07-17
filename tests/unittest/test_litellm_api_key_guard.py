@@ -82,10 +82,13 @@ def _make_anthropic_settings():
 
 def _make_openrouter_settings():
     settings = _make_settings()
+    openai_key = "test-openai-key"
     openrouter_key = "test-openrouter-key"
     openrouter_api_base = "https://openrouter.example/api/v1"
+    setattr(settings, "openai", type("OpenAI", (), {"key": openai_key})())
     setattr(settings, "openrouter", type("OpenRouter", (), {"key": openrouter_key})())
     setattr(settings, "get", lambda key, default=None: {
+        "OPENAI.KEY": openai_key,
         "OPENROUTER.KEY": openrouter_key,
         "OPENROUTER.API_BASE": openrouter_api_base,
     }.get(key, default))
@@ -95,10 +98,12 @@ def _make_openrouter_settings():
 class TestApiKeyGuard:
 
     @pytest.mark.asyncio
-    async def test_openrouter_api_base_is_request_scoped(self, monkeypatch):
-        """OpenRouter configuration must not route Anthropic requests to OpenRouter."""
+    async def test_openrouter_credentials_are_request_scoped(self, monkeypatch):
+        """OpenRouter configuration must not leak into OpenAI or Anthropic requests."""
         monkeypatch.setattr(litellm_handler, "get_settings", _make_openrouter_settings)
         monkeypatch.setattr(litellm, "api_base", None)
+        monkeypatch.setattr(litellm, "api_key", None)
+        monkeypatch.setattr(litellm_handler.openai, "api_key", None)
 
         with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion",
                    new_callable=AsyncMock) as mock_call:
@@ -106,15 +111,24 @@ class TestApiKeyGuard:
             handler = LiteLLMAIHandler()
 
             assert litellm.api_base is None
+            assert litellm.api_key is None
+            assert litellm.openai_key == "test-openai-key"
+            assert litellm_handler.openai.api_key == "test-openai-key"
             await handler.chat_completion(
                 model="openrouter/z-ai/glm-5.2", system="sys", user="usr"
             )
+            await handler.chat_completion(model="gpt-5.6-sol", system="sys", user="usr")
             await handler.chat_completion(
                 model="anthropic/claude-opus-4-8", system="sys", user="usr"
             )
 
-        assert mock_call.call_args_list[0].kwargs["api_base"] == "https://openrouter.example/api/v1"
-        assert mock_call.call_args_list[1].kwargs["api_base"] is None
+        openrouter_call, openai_call, anthropic_call = mock_call.call_args_list
+        assert openrouter_call.kwargs["api_base"] == "https://openrouter.example/api/v1"
+        assert openrouter_call.kwargs["api_key"] == "test-openrouter-key"
+        assert openai_call.kwargs["api_base"] is None
+        assert "api_key" not in openai_call.kwargs
+        assert anthropic_call.kwargs["api_base"] is None
+        assert "api_key" not in anthropic_call.kwargs
 
     @pytest.mark.asyncio
     async def test_dummy_key_not_forwarded(self, monkeypatch):

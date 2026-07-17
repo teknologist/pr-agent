@@ -53,6 +53,7 @@ class LiteLLMAIHandler(BaseAiHandler):
         self.azure = False
         self.api_base = None
         self.openrouter_api_base = None
+        self.openrouter_api_key = None
         self.repetition_penalty = None
         self._aws_imds_mode = False
         self._aws_static_creds = None
@@ -240,10 +241,8 @@ class LiteLLMAIHandler(BaseAiHandler):
 
         # Support for Openrouter models
         if get_settings().get("OPENROUTER.KEY", None):
-            openrouter_api_key = get_settings().get("OPENROUTER.KEY", None)
-            os.environ["OPENROUTER_API_KEY"] = openrouter_api_key
-            litellm.api_key = openrouter_api_key
-            openai.api_key = openrouter_api_key
+            self.openrouter_api_key = get_settings().get("OPENROUTER.KEY", None)
+            os.environ["OPENROUTER_API_KEY"] = self.openrouter_api_key
 
             openrouter_api_base = get_settings().get("OPENROUTER.API_BASE", "https://openrouter.ai/api/v1")
             os.environ["OPENROUTER_API_BASE"] = openrouter_api_base
@@ -771,13 +770,15 @@ class LiteLLMAIHandler(BaseAiHandler):
                     get_logger().info(f"\nSystem prompt:\n{system}")
                     get_logger().info(f"\nUser prompt:\n{user}")
 
-                # Inject api_key to the call. This key is populated during init by providers
-                # like Groq, SambaNova, XAI, Azure AD, and OpenRouter. Skip if None or placeholder.
+                # Inject api_key to the call. OpenRouter is request-scoped; legacy providers such as
+                # Groq, SambaNova, XAI, and Azure AD still populate litellm.api_key.
                 # Databricks authenticates via the DATABRICKS_API_KEY/DATABRICKS_API_BASE env vars,
                 # so don't override it with another provider's key in multi-provider configs.
-                if (litellm.api_key and litellm.api_key != DUMMY_LITELLM_API_KEY
-                        and not is_databricks
-                        and not (suppress_raw_logging and is_external_provider)):
+                if explicit_provider == "openrouter" and self.openrouter_api_key:
+                    kwargs["api_key"] = self.openrouter_api_key
+                elif (litellm.api_key and litellm.api_key != DUMMY_LITELLM_API_KEY
+                      and not is_databricks
+                      and not (suppress_raw_logging and is_external_provider)):
                     kwargs["api_key"] = litellm.api_key
 
                 # Get completion with automatic streaming detection
