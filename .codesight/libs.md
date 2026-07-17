@@ -1,7 +1,10 @@
 # Libraries
 
 - `pr_agent/agent/pr_agent.py` — class PRAgent
-- `pr_agent/algo/ai_handlers/base_ai_handler.py` — class BaseAiHandler
+- `pr_agent/algo/ai_handlers/base_ai_handler.py`
+  - class ModelInferenceSettings
+  - class ChatCompletionResult
+  - class BaseAiHandler
 - `pr_agent/algo/ai_handlers/langchain_ai_handler.py` — class LangChainOpenAIHandler
 - `pr_agent/algo/ai_handlers/litellm_ai_handler.py` — class LiteLLMAIHandler
 - `pr_agent/algo/ai_handlers/litellm_helpers.py` — class MockResponse
@@ -203,6 +206,14 @@
   - function verify_signature: (payload_body, secret_token, signature_header)
   - class RateLimitExceeded
   - class DefaultDictWithTimeout
+- `pr_agent/tools/council_review.py`
+  - function resolve_council_review_config: () -> CouncilReviewConfig
+  - class CouncilModelConfig
+  - class CouncilReviewConfig
+  - class CouncilMemberReview
+  - class CouncilPeerEvaluation
+  - class CouncilReviewResult
+  - _...2 more_
 - `pr_agent/tools/pr_add_docs.py` — function get_docs_for_language: (language, style), class PRAddDocs
 - `pr_agent/tools/pr_code_suggestions.py` — class PRCodeSuggestions
 - `pr_agent/tools/pr_config.py` — class PRConfig

@@ -23,6 +23,7 @@ global_settings = Dynaconf(
         "settings/generated_code_ignore.toml",
         "settings/language_extensions.toml",
         "settings/pr_reviewer_prompts.toml",
+        "settings/pr_council_review_prompts.toml",
         "settings/pr_questions_prompts.toml",
         "settings/pr_line_questions_prompts.toml",
         "settings/pr_description_prompts.toml",
@@ -97,8 +98,8 @@ def apply_secrets_manager_config():
     """
     try:
         # Dynamic imports to avoid circular dependency (secret_providers imports config_loader)
-        from pr_agent.secret_providers import get_secret_provider
         from pr_agent.log import get_logger
+        from pr_agent.secret_providers import get_secret_provider
 
         secret_provider = get_secret_provider()
         if not secret_provider:

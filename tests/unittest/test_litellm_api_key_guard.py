@@ -12,7 +12,8 @@ import litellm
 import pytest
 
 import pr_agent.algo.ai_handlers.litellm_ai_handler as litellm_handler
-from pr_agent.algo.ai_handlers.litellm_ai_handler import DUMMY_LITELLM_API_KEY, LiteLLMAIHandler
+from pr_agent.algo.ai_handlers.litellm_ai_handler import (
+    DUMMY_LITELLM_API_KEY, LiteLLMAIHandler)
 
 
 def _make_settings():
@@ -413,6 +414,28 @@ class TestApiKeyGuard:
             f"Databricks endpoint must come from DATABRICKS_API_BASE even in Azure mode. "
             f"kwargs had: {forwarded}"
         )
+
+    @pytest.mark.asyncio
+    async def test_council_external_provider_does_not_receive_azure_routing(self, monkeypatch):
+        foreign_key = "azure-key-must-not-leak"
+
+        with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion",
+                   new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = _mock_response()
+            handler = LiteLLMAIHandler()
+            handler.azure = True
+            handler.api_base = "https://private-azure.openai.azure.com"
+            handler.enable_council_redaction()
+            monkeypatch.setattr(litellm, "api_key", foreign_key)
+
+            await handler.chat_completion(
+                model="anthropic/claude-sonnet-4", system="sys", user="usr"
+            )
+
+        forwarded = mock_call.call_args[1]
+        assert forwarded["model"] == "anthropic/claude-sonnet-4"
+        assert forwarded["api_base"] is None
+        assert "api_key" not in forwarded
 
     @pytest.mark.asyncio
     async def test_ollama_and_groq_coexist(self, monkeypatch):

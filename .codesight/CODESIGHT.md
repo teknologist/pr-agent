@@ -2,9 +2,9 @@
 
 > **Stack:** fastapi | none | unknown | python
 
-> 10 routes | 0 models | 0 components | 79 lib files | 45 env vars | 4 middleware | 20% test coverage
-> **Token savings:** this file is ~6,700 tokens. Without it, AI exploration would cost ~39,600 tokens. **Saves ~32,900 tokens per conversation.**
-> **Last scanned:** 2026-07-17 14:59 — re-run after significant changes
+> 10 routes | 0 models | 0 components | 80 lib files | 45 env vars | 4 middleware | 20% test coverage
+> **Token savings:** this file is ~6,800 tokens. Without it, AI exploration would cost ~39,800 tokens. **Saves ~33,100 tokens per conversation.**
+> **Last scanned:** 2026-07-17 15:04 — re-run after significant changes
 
 ---
 
@@ -26,7 +26,10 @@
 # Libraries
 
 - `pr_agent/agent/pr_agent.py` — class PRAgent
-- `pr_agent/algo/ai_handlers/base_ai_handler.py` — class BaseAiHandler
+- `pr_agent/algo/ai_handlers/base_ai_handler.py`
+  - class ModelInferenceSettings
+  - class ChatCompletionResult
+  - class BaseAiHandler
 - `pr_agent/algo/ai_handlers/langchain_ai_handler.py` — class LangChainOpenAIHandler
 - `pr_agent/algo/ai_handlers/litellm_ai_handler.py` — class LiteLLMAIHandler
 - `pr_agent/algo/ai_handlers/litellm_helpers.py` — class MockResponse
@@ -228,6 +231,14 @@
   - function verify_signature: (payload_body, secret_token, signature_header)
   - class RateLimitExceeded
   - class DefaultDictWithTimeout
+- `pr_agent/tools/council_review.py`
+  - function resolve_council_review_config: () -> CouncilReviewConfig
+  - class CouncilModelConfig
+  - class CouncilReviewConfig
+  - class CouncilMemberReview
+  - class CouncilPeerEvaluation
+  - class CouncilReviewResult
+  - _...2 more_
 - `pr_agent/tools/pr_add_docs.py` — function get_docs_for_language: (language, style), class PRAddDocs
 - `pr_agent/tools/pr_code_suggestions.py` — class PRCodeSuggestions
 - `pr_agent/tools/pr_config.py` — class PRConfig
@@ -372,7 +383,7 @@
 # Test Coverage
 
 > **20%** of routes and models are covered by tests
-> 98 test files found
+> 100 test files found
 
 ## Covered Routes
 

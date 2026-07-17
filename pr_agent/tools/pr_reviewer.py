@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import datetime
 import traceback
@@ -12,8 +13,8 @@ from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
 from pr_agent.algo.pr_processing import (add_ai_metadata_to_diff_files,
                                          get_pr_diff,
                                          retry_with_fallback_models)
-from pr_agent.algo.skills_loader import get_skills_context
 from pr_agent.algo.repo_context import build_repo_context
+from pr_agent.algo.skills_loader import get_skills_context
 from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.utils import (ModelType, PRReviewHeader,
                                  convert_to_markdown_v2, github_action_output,
@@ -25,8 +26,17 @@ from pr_agent.git_providers.git_provider import (IncrementalPR,
                                                  get_main_pr_language)
 from pr_agent.log import get_logger
 from pr_agent.servers.help import HelpMessage
+from pr_agent.tools.council_review import (CouncilReviewError,
+                                           CouncilReviewRunner,
+                                           resolve_council_review_config)
 from pr_agent.tools.ticket_pr_compliance_check import (
     extract_and_cache_pr_tickets, extract_tickets)
+
+_COUNCIL_ATTRIBUTION = "**Council Review**: synthesized from independent member reviews."
+_COUNCIL_MEMBER_FALLBACK_ATTRIBUTION = "**Council Review**: selected by anonymized peer evaluation."
+_INVALID_CONFIG_NOTICE = "**Council Review notice**: Invalid Council Review configuration; Standard Review was used."
+_UNSUPPORTED_OVERRIDE_NOTICE = "**Council Review notice**: An unsupported inference override was ignored."
+_UNEXPECTED_COUNCIL_FAILURE_NOTICE = "Council Review failed unexpectedly."
 
 
 class PRReviewer:
@@ -61,6 +71,7 @@ class PRReviewer:
 
         if self.is_answer and not self.git_provider.is_supported("get_issue_comments"):
             raise Exception(f"Answer mode is not supported for {get_settings().config.git_provider} for now")
+        self.ai_handler_factory = ai_handler
         self.ai_handler = ai_handler()
         self.ai_handler.main_pr_language = self.main_language
         self.patches_diff = None
@@ -163,13 +174,55 @@ class PRReviewer:
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
                 self.git_provider.publish_comment("Preparing review...", is_temporary=True)
 
-            await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
+            council_config = None if self.is_answer else resolve_council_review_config()
+            self.council_review_metadata = {}
+            if council_config and council_config.enabled:
+                try:
+                    council_result = await CouncilReviewRunner(
+                        config=council_config,
+                        git_provider=self.git_provider,
+                        token_handler=self.token_handler,
+                        vars=self.vars,
+                        ai_handler_factory=self.ai_handler_factory,
+                        main_language=self.main_language,
+                    ).run()
+                    self.prediction = council_result.prediction
+                    self.council_review_metadata = council_result.metadata
+                except CouncilReviewError as e:
+                    get_logger().warning(f"Council Review failed without Standard Review fallback: {e}")
+                    self.git_provider.remove_initial_comment()
+                    if get_settings().config.publish_output:
+                        self.git_provider.publish_comment(e.public_message)
+                    return None
+                except asyncio.CancelledError:
+                    self.git_provider.remove_initial_comment()
+                    raise
+                except Exception:
+                    get_logger().warning(
+                        "Council Review failed unexpectedly without Standard Review fallback",
+                        artifact={"strategy": "council_review", "stage": "terminal_failure"},
+                    )
+                    self.git_provider.remove_initial_comment()
+                    if get_settings().config.publish_output:
+                        self.git_provider.publish_comment(_UNEXPECTED_COUNCIL_FAILURE_NOTICE)
+                    return None
+            else:
+                config_warnings = council_config.warnings if council_config else []
+                self.council_review_metadata = {
+                    "warnings": config_warnings,
+                    "standard_review_fallback": bool(config_warnings),
+                }
+                await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
+
             if not self.prediction:
                 self.git_provider.remove_initial_comment()
                 return None
 
             pr_review = self._prepare_pr_review()
-            get_logger().debug(f"PR output", artifact=pr_review)
+            if self.council_review_metadata.get("strategy") == "council_review":
+                get_logger().debug("Council Review output prepared", artifact={"strategy": "council_review"})
+            else:
+                get_logger().debug("PR output", artifact=pr_review)
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
             if not should_publish:
@@ -178,6 +231,10 @@ class PRReviewer:
                     reason += ": no major issues detected."
                 get_logger().info(reason)
                 get_settings().data = {"artifact": pr_review}
+                if get_settings().config.publish_output:
+                    for notice in self._get_council_review_notices():
+                        self.git_provider.publish_comment(notice)
+                    self.git_provider.remove_initial_comment()
                 return
 
             # publish the review
@@ -271,6 +328,23 @@ class PRReviewer:
                                                git_provider=self.git_provider,
                                                files=self.git_provider.get_diff_files())
 
+        council_metadata = getattr(self, "council_review_metadata", {})
+        council_context = self._get_council_review_notices()
+        if council_metadata.get("strategy") == "council_review":
+            attribution = (
+                _COUNCIL_MEMBER_FALLBACK_ATTRIBUTION
+                if council_metadata.get("synthesis_strategy") == "member_fallback"
+                else _COUNCIL_ATTRIBUTION
+            )
+            council_context.insert(0, attribution)
+        if council_context:
+            council_context_text = "\n\n".join(council_context)
+            header, separator, body = markdown_text.partition("\n")
+            if separator and header.startswith("## "):
+                markdown_text = f"{header}\n\n{council_context_text}\n\n{body.lstrip()}"
+            else:
+                markdown_text = f"{council_context_text}\n\n{markdown_text}"
+
         # Add help text if gfm_markdown is supported
         if self.git_provider.is_supported("gfm_markdown") and get_settings().pr_reviewer.enable_help_text:
             markdown_text += "<hr>\n\n<details> <summary><strong>💡 Tool usage guide:</strong></summary><hr> \n\n"
@@ -288,6 +362,18 @@ class PRReviewer:
             markdown_text = ""
 
         return markdown_text
+
+    def _get_council_review_notices(self) -> list[str]:
+        metadata = getattr(self, "council_review_metadata", {})
+        notices = []
+        if metadata.get("standard_review_fallback"):
+            notices.append(_INVALID_CONFIG_NOTICE)
+        if any(
+            isinstance(warning, dict) and warning.get("code") == "unsupported_inference_setting"
+            for warning in (metadata.get("warnings") or [])
+        ):
+            notices.append(_UNSUPPORTED_OVERRIDE_NOTICE)
+        return notices
 
     def _get_user_answers(self) -> Tuple[str, str]:
         """

@@ -2,14 +2,42 @@
 
 History of `npx codesight --wiki` runs. Capped at 20 entries.
 
-## [2026-07-16 09:15:59] scan | 10 routes, 0 models, 0 components → 9 articles
+## [2026-07-16 18:12:46] scan | 10 routes, 0 models, 0 components → 9 articles
 
-## [2026-07-16 09:28:07] scan | 10 routes, 0 models, 0 components → 9 articles
+## [2026-07-16 18:32:48] scan | 10 routes, 0 models, 0 components → 9 articles
 
-## [2026-07-16 09:29:55] scan | 10 routes, 0 models, 0 components → 9 articles
+## [2026-07-16 19:17:13] scan | 10 routes, 0 models, 0 components → 9 articles
 
-## [2026-07-16 10:21:11] scan | 10 routes, 0 models, 0 components → 9 articles
+## [2026-07-16 19:23:55] scan | 10 routes, 0 models, 0 components → 9 articles
 
-## [2026-07-16 11:06:59] scan | 10 routes, 0 models, 0 components → 9 articles
+## [2026-07-16 19:39:19] scan | 10 routes, 0 models, 0 components → 9 articles
 
-## [2026-07-17 14:59:04] scan | 10 routes, 0 models, 0 components → 9 articles
+## [2026-07-16 19:51:51] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 20:03:50] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 20:17:01] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 20:22:42] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 20:29:58] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 21:08:01] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 21:36:48] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 21:38:45] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 21:39:41] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 22:08:40] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 22:10:32] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-16 22:53:58] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-17 14:50:46] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-17 15:02:15] scan | 10 routes, 0 models, 0 components → 9 articles
+
+## [2026-07-17 15:04:04] scan | 10 routes, 0 models, 0 components → 9 articles

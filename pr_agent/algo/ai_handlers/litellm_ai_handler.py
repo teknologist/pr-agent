@@ -15,7 +15,9 @@ from pr_agent.algo import (CLAUDE_EXTENDED_THINKING_MODELS,
                            STREAMING_REQUIRED_MODELS,
                            SUPPORT_REASONING_EFFORT_MODELS,
                            USER_MESSAGE_ONLY_MODELS)
-from pr_agent.algo.ai_handlers.base_ai_handler import BaseAiHandler
+from pr_agent.algo.ai_handlers.base_ai_handler import (UNSET, BaseAiHandler,
+                                                       ChatCompletionResult,
+                                                       ModelInferenceSettings)
 from pr_agent.algo.ai_handlers.litellm_helpers import (
     MockResponse, _get_azure_ad_token, _handle_streaming_response,
     _process_litellm_extra_body)
@@ -33,6 +35,15 @@ class LiteLLMAIHandler(BaseAiHandler):
     It initializes the API key and other settings from a configuration file,
     and provides a method for performing chat completions using the OpenAI ChatCompletion API.
     """
+
+    manages_ai_timeout = True
+    supports_council_redaction = True
+
+    def enable_council_redaction(self) -> bool:
+        """Enable LiteLLM no-log mode unless an administrator disabled it globally."""
+        if getattr(litellm, "global_disable_no_log_param", False):
+            return False
+        return super().enable_council_redaction()
 
     def __init__(self):
         """
@@ -122,7 +133,10 @@ class LiteLLMAIHandler(BaseAiHandler):
                             "AWS_USE_IMDS: IMDS resolution failed; using static credentials"
                         )
         elif get_settings().get("aws.AWS_ACCESS_KEY_ID"):
-            assert get_settings().aws.AWS_SECRET_ACCESS_KEY and get_settings().aws.AWS_REGION_NAME, "AWS credentials are incomplete"
+            assert (
+                get_settings().aws.AWS_SECRET_ACCESS_KEY
+                and get_settings().aws.AWS_REGION_NAME
+            ), "AWS credentials are incomplete"
             os.environ["AWS_ACCESS_KEY_ID"] = get_settings().aws.AWS_ACCESS_KEY_ID
             os.environ["AWS_SECRET_ACCESS_KEY"] = get_settings().aws.AWS_SECRET_ACCESS_KEY
             os.environ["AWS_REGION_NAME"] = get_settings().aws.AWS_REGION_NAME
@@ -182,7 +196,9 @@ class LiteLLMAIHandler(BaseAiHandler):
         # Google AI Studio
         # SEE https://docs.litellm.ai/docs/providers/gemini
         if get_settings().get("GOOGLE_AI_STUDIO.GEMINI_API_KEY", None):
-          os.environ["GEMINI_API_KEY"] = get_settings().google_ai_studio.gemini_api_key
+            os.environ["GEMINI_API_KEY"] = (
+                get_settings().google_ai_studio.gemini_api_key
+            )
 
         # Support deepseek models
         if get_settings().get("DEEPSEEK.KEY", None):
@@ -267,6 +283,13 @@ class LiteLLMAIHandler(BaseAiHandler):
         self.streaming_required_models = STREAMING_REQUIRED_MODELS
 
     @staticmethod
+    def _matches_model_capability(model: str, model_list: list[str]) -> bool:
+        """Return whether a routed model name matches a capability list entry."""
+        return model in model_list or any(
+            model.endswith(f"/{candidate}") for candidate in model_list
+        )
+
+    @staticmethod
     def _write_frozen_aws_creds_to_env(frozen) -> None:
         """Write a botocore FrozenCredentials snapshot into os.environ for litellm/Bedrock."""
         os.environ["AWS_ACCESS_KEY_ID"] = frozen.access_key
@@ -331,28 +354,56 @@ class LiteLLMAIHandler(BaseAiHandler):
         Returns:
             dict: Updated kwargs with extended thinking configuration
         """
-        extended_thinking_budget_tokens = get_settings().config.get("extended_thinking_budget_tokens", 2048)
-        extended_thinking_max_output_tokens = get_settings().config.get("extended_thinking_max_output_tokens", 4096)
+        extended_thinking_budget_tokens = get_settings().config.get(
+            "extended_thinking_budget_tokens", 2048
+        )
+        extended_thinking_max_output_tokens = get_settings().config.get(
+            "extended_thinking_max_output_tokens", 4096
+        )
 
         # Validate extended thinking parameters
-        if not isinstance(extended_thinking_budget_tokens, int) or extended_thinking_budget_tokens <= 0:
-            raise ValueError(f"extended_thinking_budget_tokens must be a positive integer, got {extended_thinking_budget_tokens}")
-        if not isinstance(extended_thinking_max_output_tokens, int) or extended_thinking_max_output_tokens <= 0:
-            raise ValueError(f"extended_thinking_max_output_tokens must be a positive integer, got {extended_thinking_max_output_tokens}")
+        if (
+            not isinstance(extended_thinking_budget_tokens, int)
+            or extended_thinking_budget_tokens <= 0
+        ):
+            raise ValueError(
+                "extended_thinking_budget_tokens must be a positive integer, "
+                f"got {extended_thinking_budget_tokens}"
+            )
+        if (
+            not isinstance(extended_thinking_max_output_tokens, int)
+            or extended_thinking_max_output_tokens <= 0
+        ):
+            raise ValueError(
+                "extended_thinking_max_output_tokens must be a positive integer, "
+                f"got {extended_thinking_max_output_tokens}"
+            )
         if extended_thinking_max_output_tokens < extended_thinking_budget_tokens:
-            raise ValueError(f"extended_thinking_max_output_tokens ({extended_thinking_max_output_tokens}) must be greater than or equal to extended_thinking_budget_tokens ({extended_thinking_budget_tokens})")
+            raise ValueError(
+                "extended_thinking_max_output_tokens "
+                f"({extended_thinking_max_output_tokens}) must be greater than "
+                "or equal to extended_thinking_budget_tokens "
+                f"({extended_thinking_budget_tokens})"
+            )
 
         kwargs["thinking"] = {
             "type": "enabled",
             "budget_tokens": extended_thinking_budget_tokens
         }
         if get_settings().config.verbosity_level >= 2:
-            get_logger().info(f"Adding max output tokens {extended_thinking_max_output_tokens} to model {model}, extended thinking budget tokens: {extended_thinking_budget_tokens}")
+            get_logger().info(
+                f"Adding max output tokens {extended_thinking_max_output_tokens} "
+                f"to model {model}, extended thinking budget tokens: "
+                f"{extended_thinking_budget_tokens}"
+            )
         kwargs["max_tokens"] = extended_thinking_max_output_tokens
 
         # temperature may only be set to 1 when thinking is enabled
         if get_settings().config.verbosity_level >= 2:
-            get_logger().info("Temperature may only be set to 1 when thinking is enabled with claude models.")
+            get_logger().info(
+                "Temperature may only be set to 1 when thinking is enabled "
+                "with claude models."
+            )
         kwargs["temperature"] = 1
 
         return kwargs
@@ -422,7 +473,16 @@ class LiteLLMAIHandler(BaseAiHandler):
         retry=retry_if_exception_type(openai.APIError) & retry_if_not_exception_type(openai.RateLimitError),
         stop=stop_after_attempt(MODEL_RETRIES),
     )
-    async def chat_completion(self, model: str, system: str, user: str, temperature: float = 0.2, img_path: str = None):
+    async def chat_completion(
+        self,
+        model: str,
+        system: str,
+        user: str,
+        temperature: float | None = 0.2,
+        img_path: str = None,
+        inference_settings: ModelInferenceSettings | None = None,
+        _return_metadata: bool = False,
+    ):
         # Serialize env-var mutation + Bedrock call for IMDS mode to prevent concurrent
         # requests from interleaving os.environ credentials during asyncio.gather usage.
         _bedrock_imds = self._aws_imds_mode and 'bedrock/' in model
@@ -433,17 +493,40 @@ class LiteLLMAIHandler(BaseAiHandler):
                     self._aws_imds_fell_back = True
             try:
                 resp, finish_reason = None, None
-                deployment_id = self.deployment_id
-                # Capture the original model string so an explicit provider prefix in the
-                # user config (e.g. "azure/gpt-5...") can be preserved when the GPT-5 branch
-                # rebuilds the routed model name below.
-                user_model = model
+                metadata = {"warnings": []}
+                suppress_raw_logging = getattr(self, "suppress_raw_logging", False)
+                settings = get_settings()
+                if temperature is None:
+                    temperature = settings.config.temperature
+                request_temperature = (
+                    inference_settings is not None and inference_settings.temperature is not UNSET
+                )
+                request_reasoning_effort = (
+                    inference_settings is not None and inference_settings.reasoning_effort is not UNSET
+                )
+                if request_temperature:
+                    temperature = inference_settings.temperature
+                effective_reasoning_effort = (
+                    inference_settings.reasoning_effort
+                    if request_reasoning_effort
+                    else settings.config.reasoning_effort
+                )
+                request_deployment_id = (
+                    inference_settings is not None and inference_settings.deployment_id is not UNSET
+                )
+                deployment_id = (
+                    inference_settings.deployment_id if request_deployment_id else self.deployment_id
+                )
                 # Capture the provider prefix before any rewriting below. Databricks auth/endpoint
                 # selection keys off this; rewriting (e.g. 'azure/' + model when Azure is enabled in
                 # a multi-provider config) would otherwise hide the 'databricks/' prefix and bypass
                 # the guards that keep Databricks on its own DATABRICKS_API_KEY/DATABRICKS_API_BASE.
                 is_databricks = model.startswith("databricks/")
-                if self.azure and not is_databricks:
+                explicit_provider = model.split("/", 1)[0] if "/" in model else None
+                if suppress_raw_logging and explicit_provider and not request_deployment_id:
+                    deployment_id = None
+                is_external_provider = explicit_provider not in {None, "openai", "azure"}
+                if self.azure and not is_external_provider:
                     model = 'azure/' + model
                 if 'claude' in model and not system:
                     system = "No system prompt provided"
@@ -456,11 +539,22 @@ class LiteLLMAIHandler(BaseAiHandler):
                         # check if the image link is alive
                         r = requests.head(img_path, allow_redirects=True)
                         if r.status_code == 404:
-                            error_msg = f"The image link is not [alive](img_path).\nPlease repost the original image as a comment, and send the question again with 'quote reply' (see [instructions](https://pr-agent-docs.codium.ai/tools/ask/#ask-on-images-using-the-pr-code-as-context))."
+                            error_msg = (
+                                "The image link is not [alive](img_path).\n"
+                                "Please repost the original image as a comment, "
+                                "and send the question again with 'quote reply' "
+                                "(see [instructions]"
+                                "(https://pr-agent-docs.codium.ai/tools/ask/"
+                                "#ask-on-images-using-the-pr-code-as-context))."
+                            )
                             get_logger().error(error_msg)
-                            return f"{error_msg}", "error"
+                            if _return_metadata:
+                                return ChatCompletionResult(error_msg, "error", metadata)
+                            return error_msg, "error"
                     except Exception as e:
                         get_logger().error(f"Error fetching image: {img_path}", e)
+                        if _return_metadata:
+                            return ChatCompletionResult(f"Error fetching image: {img_path}", "error", metadata)
                         return f"Error fetching image: {img_path}", "error"
                     messages[1]["content"] = [{"type": "text", "text": messages[1]["content"]},
                                               {"type": "image_url", "image_url": {"url": img_path}}]
@@ -471,18 +565,26 @@ class LiteLLMAIHandler(BaseAiHandler):
                 # and Azure mode auto-prepends "azure/", which together can produce stacked prefixes
                 # like "azure/openai/gpt-5...". Without normalization the GPT-5 path is skipped and
                 # litellm rejects the request with UnsupportedParamsError for temperature=0.2.
-                model_base = model
-                while model_base.startswith(('openai/', 'azure/')):
-                    model_base = model_base.removeprefix('openai/').removeprefix('azure/')
+                model_base = model.rsplit('/', 1)[-1]
                 if model_base.startswith('gpt-5'):
-                    # Use configured reasoning_effort or default to MEDIUM
-                    config_effort = get_settings().config.reasoning_effort
+                    # Use request-scoped reasoning_effort, configured reasoning_effort,
+                    # or default to MEDIUM.
+                    config_effort = effective_reasoning_effort
                     try:
                         ReasoningEffort(config_effort)
                         effort = config_effort
                     except (ValueError, TypeError):
                         effort = ReasoningEffort.MEDIUM.value
-                        if config_effort is not None:
+                        if request_reasoning_effort:
+                            metadata["warnings"].append({
+                                "code": "invalid_inference_setting",
+                                "setting": "reasoning_effort",
+                                "message": (
+                                    f"reasoning_effort override has invalid value {config_effort!r} "
+                                    f"and was ignored; using default {effort!r}."
+                                ),
+                            })
+                        elif config_effort is not None:
                             get_logger().warning(
                                 f"Invalid reasoning_effort '{config_effort}' in config. "
                                 f"Using default '{effort}'. Valid values: {[e.value for e in ReasoningEffort]}"
@@ -493,19 +595,12 @@ class LiteLLMAIHandler(BaseAiHandler):
                         "allowed_openai_params": ["reasoning_effort"],
                     }
                     get_logger().info(f"Using reasoning_effort='{effort}' for GPT-5 model")
-                    # Routing priority: Azure mode > explicit provider prefix in user config > openai/
-                    # default. This preserves an explicit "azure/" the user wrote in config even when
-                    # self.azure is false, and avoids stacking when self.azure already added "azure/".
                     if self.azure:
-                        provider_prefix = 'azure/'
-                    elif user_model.startswith('azure/'):
-                        provider_prefix = 'azure/'
-                    elif user_model.startswith('openai/'):
-                        provider_prefix = 'openai/'
+                        model = f"azure/{model_base.replace('_thinking', '')}"
+                    elif "/" not in model:
+                        model = f"openai/{model_base.replace('_thinking', '')}"
                     else:
-                        provider_prefix = 'openai/'
-                    model = provider_prefix + model_base.replace('_thinking', '')  # remove _thinking suffix
-
+                        model = model.replace('_thinking', '')
 
                 # Currently, some models do not support a separate system and user prompts
                 if model in self.user_message_only_models or get_settings().config.custom_reasoning_model:
@@ -518,7 +613,12 @@ class LiteLLMAIHandler(BaseAiHandler):
                 # Databricks selects its endpoint via the DATABRICKS_API_BASE env var; don't let an
                 # api_base configured by another provider (OpenRouter/Ollama/Azure AD/OpenAI) during
                 # __init__ override it in multi-provider configs. None lets LiteLLM read the env var.
-                api_base = os.environ.get("DATABRICKS_API_BASE") if is_databricks else self.api_base
+                if is_databricks:
+                    api_base = os.environ.get("DATABRICKS_API_BASE")
+                elif suppress_raw_logging and is_external_provider:
+                    api_base = None
+                else:
+                    api_base = self.api_base
                 kwargs = {
                         "model": model,
                         "deployment_id": deployment_id,
@@ -527,43 +627,116 @@ class LiteLLMAIHandler(BaseAiHandler):
                         "api_base": api_base,
                     }
 
+                supports_temperature = (
+                    not self._matches_model_capability(
+                        model,
+                        self.no_support_temperature_models,
+                    )
+                    and not get_settings().config.custom_reasoning_model
+                )
+                supports_reasoning_effort = self._matches_model_capability(
+                    model,
+                    self.support_reasoning_models,
+                )
+
                 # Add temperature only if model supports it
-                if model not in self.no_support_temperature_models and not get_settings().config.custom_reasoning_model:
+                if supports_temperature:
                     # get_logger().info(f"Adding temperature with value {temperature} to model {model}.")
                     kwargs["temperature"] = temperature
+                elif request_temperature:
+                    metadata["warnings"].append({
+                        "code": "unsupported_inference_setting",
+                        "setting": "temperature",
+                        "message": (
+                            "temperature override is not supported by model "
+                            f"{model} and was ignored."
+                        ),
+                    })
 
                 if thinking_kwargs_gpt5:
                     kwargs.update(thinking_kwargs_gpt5)
                     if 'temperature' in kwargs:
                         del kwargs['temperature']
+                        if request_temperature:
+                            metadata["warnings"].append({
+                                "code": "unsupported_inference_setting",
+                                "setting": "temperature",
+                                "message": (
+                                    "temperature override is not supported by model "
+                                    f"{model} and was ignored."
+                                ),
+                            })
 
                 # Add reasoning_effort if model supports it
-                if model in self.support_reasoning_models:
-                    config_effort = get_settings().config.reasoning_effort
+                if supports_reasoning_effort:
+                    config_effort = effective_reasoning_effort
                     try:
                         ReasoningEffort(config_effort)
                         reasoning_effort = config_effort
                     except (ValueError, TypeError):
                         reasoning_effort = ReasoningEffort.MEDIUM.value
-                        if config_effort is not None:
+                        if request_reasoning_effort:
+                            metadata["warnings"].append({
+                                "code": "invalid_inference_setting",
+                                "setting": "reasoning_effort",
+                                "message": (
+                                    f"reasoning_effort override has invalid value {config_effort!r} "
+                                    f"and was ignored; using default {reasoning_effort!r}."
+                                ),
+                            })
+                        elif config_effort is not None:
                             get_logger().warning(
                                 f"Invalid reasoning_effort '{config_effort}' in config. "
-                                f"Using default '{reasoning_effort}'. Valid values: {[e.value for e in ReasoningEffort]}"
+                                f"Using default '{reasoning_effort}'. Valid "
+                                f"values: {[e.value for e in ReasoningEffort]}"
                             )
 
-                    get_logger().info(f"Adding reasoning_effort with value {reasoning_effort} to model {model}.")
+                    get_logger().info(
+                        f"Adding reasoning_effort with value {reasoning_effort} to model {model}."
+                    )
                     kwargs["reasoning_effort"] = reasoning_effort
+                elif request_reasoning_effort and not thinking_kwargs_gpt5:
+                    metadata["warnings"].append({
+                        "code": "unsupported_inference_setting",
+                        "setting": "reasoning_effort",
+                        "message": (
+                            "reasoning_effort override is not supported by model "
+                            f"{model} and was ignored."
+                        ),
+                    })
 
                 # https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
-                if (model in self.claude_extended_thinking_models) and get_settings().config.get("enable_claude_extended_thinking", False):
+                if (
+                    model in self.claude_extended_thinking_models
+                    and get_settings().config.get(
+                        "enable_claude_extended_thinking", False
+                    )
+                ):
                     kwargs = self._configure_claude_extended_thinking(model, kwargs)
+                    if request_temperature and temperature != 1:
+                        metadata["warnings"].append({
+                            "code": "unsupported_inference_setting",
+                            "setting": "temperature",
+                            "message": (
+                                "temperature override is not supported by "
+                                f"model {model} and was ignored."
+                            ),
+                        })
 
-                if get_settings().litellm.get("enable_callbacks", False):
+                if suppress_raw_logging:
+                    kwargs["no-log"] = True
+                elif get_settings().litellm.get("enable_callbacks", False):
                     kwargs = self.add_litellm_callbacks(kwargs)
 
                 seed = get_settings().config.get("seed", -1)
-                if temperature > 0 and seed >= 0:
-                    raise ValueError(f"Seed ({seed}) is not supported with temperature ({temperature}) > 0")
+                request_temperature_for_seed = kwargs.get("temperature")
+                if request_temperature_for_seed is None and not request_temperature:
+                    request_temperature_for_seed = temperature
+                if request_temperature_for_seed is not None and request_temperature_for_seed > 0 and seed >= 0:
+                    raise ValueError(
+                        f"Seed ({seed}) is not supported with temperature "
+                        f"({request_temperature_for_seed}) > 0"
+                    )
                 elif seed >= 0:
                     get_logger().info(f"Using fixed seed of {seed}")
                     kwargs["seed"] = seed
@@ -571,7 +744,8 @@ class LiteLLMAIHandler(BaseAiHandler):
                 if self.repetition_penalty:
                     kwargs["repetition_penalty"] = self.repetition_penalty
 
-                #Added support for extra_headers while using litellm to call underlying model, via a api management gateway, would allow for passing custom headers for security and authorization
+                # Added support for extra_headers while using litellm to call
+                # the underlying model via an API management gateway.
                 if get_settings().get("LITELLM.EXTRA_HEADERS", None):
                     try:
                         litellm_extra_headers = json.loads(get_settings().litellm.extra_headers)
@@ -590,9 +764,10 @@ class LiteLLMAIHandler(BaseAiHandler):
                     kwargs["model_id"] = model_id
                     get_logger().info(f"Using Bedrock custom inference profile: {model_id}")
 
-                get_logger().debug("Prompts", artifact={"system": system, "user": user})
+                if not suppress_raw_logging:
+                    get_logger().debug("Prompts", artifact={"system": system, "user": user})
 
-                if get_settings().config.verbosity_level >= 2:
+                if get_settings().config.verbosity_level >= 2 and not suppress_raw_logging:
                     get_logger().info(f"\nSystem prompt:\n{system}")
                     get_logger().info(f"\nUser prompt:\n{user}")
 
@@ -601,14 +776,18 @@ class LiteLLMAIHandler(BaseAiHandler):
                 # Databricks authenticates via the DATABRICKS_API_KEY/DATABRICKS_API_BASE env vars,
                 # so don't override it with another provider's key in multi-provider configs.
                 if (litellm.api_key and litellm.api_key != DUMMY_LITELLM_API_KEY
-                        and not is_databricks):
+                        and not is_databricks
+                        and not (suppress_raw_logging and is_external_provider)):
                     kwargs["api_key"] = litellm.api_key
 
                 # Get completion with automatic streaming detection
                 resp, finish_reason, response_obj = await self._get_completion(**kwargs)
 
             except openai.RateLimitError as e:
-                get_logger().error(f"Rate limit error during LLM inference: {e}")
+                if suppress_raw_logging:
+                    get_logger().error("Rate limit error during LLM inference")
+                else:
+                    get_logger().error(f"Rate limit error during LLM inference: {e}")
                 raise
             except openai.APIError as e:
                 if _bedrock_imds and not self._aws_imds_fell_back and self._aws_static_creds:
@@ -619,23 +798,62 @@ class LiteLLMAIHandler(BaseAiHandler):
                     # allowing a concurrent coroutine to overwrite os.environ.
                     resp, finish_reason, response_obj = await self._get_completion(**kwargs)
                 else:
-                    get_logger().warning(f"Error during LLM inference: {e}")
+                    if suppress_raw_logging:
+                        get_logger().warning("Error during LLM inference")
+                    else:
+                        get_logger().warning(f"Error during LLM inference: {e}")
                     raise
             except Exception as e:
-                get_logger().warning(f"Unknown error during LLM inference: {e}")
+                if suppress_raw_logging:
+                    get_logger().warning("Unknown error during LLM inference")
+                else:
+                    get_logger().warning(f"Unknown error during LLM inference: {e}")
                 raise openai.APIError from e
 
-            get_logger().debug(f"\nAI response:\n{resp}")
+            if not suppress_raw_logging:
+                get_logger().debug(f"\nAI response:\n{resp}")
 
-            # log the full response for debugging
-            response_log = self.prepare_logs(response_obj, system, user, resp, finish_reason)
-            get_logger().debug("Full_response", artifact=response_log)
+                # log the full response for debugging
+                response_log = self.prepare_logs(response_obj, system, user, resp, finish_reason)
+                get_logger().debug("Full_response", artifact=response_log)
 
-            # for CLI debugging
-            if get_settings().config.verbosity_level >= 2:
-                get_logger().info(f"\nAI response:\n{resp}")
+                # for CLI debugging
+                if get_settings().config.verbosity_level >= 2:
+                    get_logger().info(f"\nAI response:\n{resp}")
 
+            usage = getattr(response_obj, "usage", None)
+            if usage is not None:
+                token_usage = {}
+                for field_name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    value = usage.get(field_name) if isinstance(usage, dict) else getattr(usage, field_name, None)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        token_usage[field_name] = value
+                if token_usage:
+                    metadata["token_usage"] = token_usage
+
+            if _return_metadata:
+                return ChatCompletionResult(resp, finish_reason, metadata)
             return resp, finish_reason
+
+    async def chat_completion_with_metadata(
+        self,
+        model: str,
+        system: str,
+        user: str,
+        temperature: float | None = None,
+        img_path: str = None,
+        inference_settings: ModelInferenceSettings | None = None,
+    ) -> ChatCompletionResult:
+        """Return a LiteLLM chat completion plus request-scoped inference metadata."""
+        return await self.chat_completion(
+            model=model,
+            system=system,
+            user=user,
+            temperature=temperature,
+            img_path=img_path,
+            inference_settings=inference_settings,
+            _return_metadata=True,
+        )
 
     async def _get_completion(self, **kwargs):
         """
@@ -646,9 +864,12 @@ class LiteLLMAIHandler(BaseAiHandler):
             kwargs["stream"] = True
             get_logger().info(f"Using streaming mode for model {model}")
             response = await acompletion(**kwargs)
-            resp, finish_reason = await _handle_streaming_response(response)
+            resp, finish_reason, usage = await _handle_streaming_response(
+                response,
+                suppress_raw_logging=getattr(self, "suppress_raw_logging", False),
+            )
             # Create MockResponse for streaming since we don't have the full response object
-            mock_response = MockResponse(resp, finish_reason)
+            mock_response = MockResponse(resp, finish_reason, usage)
             return resp, finish_reason, mock_response
         else:
             response = await acompletion(**kwargs)
