@@ -20,3 +20,6 @@ poetry.lock
 graphify-out/
 /.pi/addy-workflow/state
 /.pi/input-history.jsonl
+/.pi/loops
+/.pi/structured-returns
+/.pi/tasks
