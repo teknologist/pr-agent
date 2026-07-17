@@ -80,7 +80,41 @@ def _make_anthropic_settings():
     })()
 
 
+def _make_openrouter_settings():
+    settings = _make_settings()
+    openrouter_key = "test-openrouter-key"
+    openrouter_api_base = "https://openrouter.example/api/v1"
+    setattr(settings, "openrouter", type("OpenRouter", (), {"key": openrouter_key})())
+    setattr(settings, "get", lambda key, default=None: {
+        "OPENROUTER.KEY": openrouter_key,
+        "OPENROUTER.API_BASE": openrouter_api_base,
+    }.get(key, default))
+    return settings
+
+
 class TestApiKeyGuard:
+
+    @pytest.mark.asyncio
+    async def test_openrouter_api_base_is_request_scoped(self, monkeypatch):
+        """OpenRouter configuration must not route Anthropic requests to OpenRouter."""
+        monkeypatch.setattr(litellm_handler, "get_settings", _make_openrouter_settings)
+        monkeypatch.setattr(litellm, "api_base", None)
+
+        with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion",
+                   new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = _mock_response()
+            handler = LiteLLMAIHandler()
+
+            assert litellm.api_base is None
+            await handler.chat_completion(
+                model="openrouter/z-ai/glm-5.2", system="sys", user="usr"
+            )
+            await handler.chat_completion(
+                model="anthropic/claude-opus-4-8", system="sys", user="usr"
+            )
+
+        assert mock_call.call_args_list[0].kwargs["api_base"] == "https://openrouter.example/api/v1"
+        assert mock_call.call_args_list[1].kwargs["api_base"] is None
 
     @pytest.mark.asyncio
     async def test_dummy_key_not_forwarded(self, monkeypatch):

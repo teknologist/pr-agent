@@ -52,6 +52,7 @@ class LiteLLMAIHandler(BaseAiHandler):
         """
         self.azure = False
         self.api_base = None
+        self.openrouter_api_base = None
         self.repetition_penalty = None
         self._aws_imds_mode = False
         self._aws_static_creds = None
@@ -246,8 +247,7 @@ class LiteLLMAIHandler(BaseAiHandler):
 
             openrouter_api_base = get_settings().get("OPENROUTER.API_BASE", "https://openrouter.ai/api/v1")
             os.environ["OPENROUTER_API_BASE"] = openrouter_api_base
-            self.api_base = openrouter_api_base
-            litellm.api_base = openrouter_api_base
+            self.openrouter_api_base = openrouter_api_base
 
         # Models that only use user message
         self.user_message_only_models = USER_MESSAGE_ONLY_MODELS
@@ -610,12 +610,12 @@ class LiteLLMAIHandler(BaseAiHandler):
                     messages = [{"role": "user", "content": user}]
 
                 # Build request kwargs after normalizing messages for the target model.
-                # Databricks selects its endpoint via the DATABRICKS_API_BASE env var; don't let an
-                # api_base configured by another provider (OpenRouter/Ollama/Azure AD/OpenAI) during
-                # __init__ override it in multi-provider configs. None lets LiteLLM read the env var.
+                # Provider-specific endpoints must not leak into other providers in multi-provider configs.
                 if is_databricks:
                     api_base = os.environ.get("DATABRICKS_API_BASE")
-                elif suppress_raw_logging and is_external_provider:
+                elif explicit_provider == "openrouter":
+                    api_base = self.openrouter_api_base
+                elif is_external_provider:
                     api_base = None
                 else:
                     api_base = self.api_base
