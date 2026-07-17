@@ -211,13 +211,15 @@ class CouncilReviewRunner:
             self._run_member(member, index) for index, member in enumerate(self.config.members, start=1)
         ])
         successful_reviews = []
+        successful_member_models = []
         failed_members = 0
-        for result in member_results:
+        for member, result in zip(self.config.members, member_results):
             if isinstance(result, BaseException):
                 failed_members += 1
                 get_logger().warning("Council member review failed")
             else:
                 successful_reviews.append(result)
+                successful_member_models.append(member.model)
 
         quorum = {"required": 2, "successful": len(successful_reviews), "met": len(successful_reviews) >= 2}
         get_logger().info(
@@ -308,6 +310,7 @@ class CouncilReviewRunner:
             "strategy": "council_review",
             "member_count": len(self.config.members),
             "successful_member_count": len(successful_reviews),
+            "successful_member_models": successful_member_models,
             "failed_member_count": failed_members,
             "quorum": quorum,
             "peer_evaluation_enabled": self.config.peer_evaluation,

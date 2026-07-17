@@ -455,6 +455,7 @@ def test_successful_council_uses_member_models_model_specific_diffs_and_returns_
     assert parsed_prediction["review"]["security_concerns"].strip() == "No"
     assert result.metadata["strategy"] == "council_review"
     assert result.metadata["successful_member_count"] == 2
+    assert result.metadata["successful_member_models"] == ["member-a", "member-b"]
     assert diff_models == ["member-a", "member-b"]
     assert FakeAiHandler.max_active_calls > 1
     assert [call["model"] for call in FakeAiHandler.calls] == ["member-a", "member-b", "chair"]
@@ -790,6 +791,7 @@ def test_malformed_member_does_not_count_toward_quorum_but_successful_reviews_go
 
     chair_call = FakeAiHandler.calls[-1]
     assert result.metadata["successful_member_count"] == 2
+    assert result.metadata["successful_member_models"] == ["member-a", "member-c"]
     assert result.metadata["failed_member_count"] == 1
     assert chair_call["model"] == "chair"
     assert chair_call["user"].count("response_") == 2
@@ -1754,13 +1756,14 @@ async def test_pr_reviewer_runtime_no_quorum_does_not_run_standard_review_or_pub
     ]
 
 
-def test_successful_review_attribution_omits_council_topology_and_deliberation(monkeypatch):
+def test_successful_review_attribution_lists_participating_models_and_omits_deliberation(monkeypatch):
     reviewer = _reviewer_for_integration_run()
     reviewer.prediction = _VALID_REVIEW
     reviewer.council_review_metadata = {
         "strategy": "council_review",
         "successful_member_count": 2,
-        "chair_model": "private-chair-model",
+        "successful_member_models": ["member-a", "member-b"],
+        "chair_model": "chair-model",
         "rankings": ["response_1", "response_2"],
         "warnings": [{"code": "unsupported_inference_setting"}],
     }
@@ -1774,10 +1777,10 @@ def test_successful_review_attribution_omits_council_topology_and_deliberation(m
 
     assert published_review.startswith(
         "**Council Review**: synthesized from independent member reviews.\n\n"
+        "**Council participants**: Members: `member-a`, `member-b`; Chair: `chair-model`.\n\n"
         "**Council Review notice**: An unsupported inference override was ignored.\n\n"
         "Review body"
     )
-    assert "private-chair-model" not in published_review
     assert "response_1" not in published_review
     assert "2 independent" not in published_review
 

@@ -337,6 +337,12 @@ class PRReviewer:
                 else _COUNCIL_ATTRIBUTION
             )
             council_context.insert(0, attribution)
+            member_models = council_metadata.get("successful_member_models", [])
+            if member_models:
+                members = ", ".join(f"`{str(model).replace('`', '')}`" for model in member_models)
+                chair_model = council_metadata.get("chair_model")
+                chair = f"`{str(chair_model).replace('`', '')}`" if chair_model else "none (member fallback)"
+                council_context.insert(1, f"**Council participants**: Members: {members}; Chair: {chair}.")
         if council_context:
             council_context_text = "\n\n".join(council_context)
             header, separator, body = markdown_text.partition("\n")
