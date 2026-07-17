@@ -6,7 +6,7 @@
 
 ## Scale
 
-10 API routes · 80 library files · 4 middleware layers · 45 environment variables
+10 API routes · 82 library files · 4 middleware layers · 45 environment variables
 
 ## Subsystems
 
@@ -17,7 +17,7 @@
 - **[Github_app](./github_app.md)** — 2 routes — touches: auth, payment
 - **[Infra](./infra.md)** — 2 routes — touches: auth, payment
 
-**Libraries:** 80 files — see [libraries.md](./libraries.md)
+**Libraries:** 82 files — see [libraries.md](./libraries.md)
 
 ## High-Impact Files
 

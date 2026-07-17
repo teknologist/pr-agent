@@ -130,6 +130,7 @@
   - function mosaico_log_context: (meta, context_id)
   - function langfuse_span: (meta, context_id)
 - `pr_agent/mosaico/server.py` — function build_app: (), function start: () -> None
+- `pr_agent/provider_connectivity.py` — function main: () -> bool
 - `pr_agent/secret_providers/__init__.py` — function get_secret_provider: ()
 - `pr_agent/secret_providers/aws_secrets_manager_provider.py` — class AWSSecretsManagerProvider
 - `pr_agent/secret_providers/google_cloud_storage_secret_provider.py` — class GoogleCloudStorageSecretProvider
@@ -257,4 +258,8 @@
   - function check_tickets_relevancy: ()
   - function extract_tickets: (git_provider)
   - function extract_and_cache_pr_tickets: (git_provider, vars)
+- `pr_agent_settings/test_provider_connectivity.py`
+  - function unwrap: (exc)
+  - function test: (handler, provider, model)
+  - function main: ()
 - `scripts/set_pyproject_version.py` — function main: () -> None

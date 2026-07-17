@@ -2,9 +2,9 @@
 
 > **Navigation aid.** Library inventory extracted via AST. Read the source files listed here before modifying exported functions.
 
-**80 library files** across 2 modules
+**82 library files** across 3 modules
 
-## Pr_agent (79 files)
+## Pr_agent (80 files)
 
 - `pr_agent/algo/utils.py` — get_model, get_setting, emphasize_header, unique_strings, convert_to_markdown_v2, extract_relevant_lines_str, …
 - `pr_agent/servers/github_app.py` — handle_closed_pr, get_log_context, is_bot_user, should_process_pr_logic, handle_line_comments, start, …
@@ -31,7 +31,11 @@
 - `pr_agent/algo/language_handler.py` — filter_bad_extensions, is_valid_file, sort_files_by_main_languages
 - `pr_agent/algo/repo_context.py` — render_instruction_files, render_instruction_files_with_line_budget, build_repo_context
 - `pr_agent/algo/token_handler.py` — ModelTypeValidator, TokenEncoder, TokenHandler
-- _…and 54 more files_
+- _…and 55 more files_
+
+## Pr_agent_settings (1 files)
+
+- `pr_agent_settings/test_provider_connectivity.py` — unwrap, test, main
 
 ## Scripts (1 files)
 

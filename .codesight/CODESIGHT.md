@@ -2,9 +2,9 @@
 
 > **Stack:** fastapi | none | unknown | python
 
-> 10 routes | 0 models | 0 components | 80 lib files | 45 env vars | 4 middleware | 20% test coverage
-> **Token savings:** this file is ~6,800 tokens. Without it, AI exploration would cost ~39,800 tokens. **Saves ~33,100 tokens per conversation.**
-> **Last scanned:** 2026-07-17 18:19 — re-run after significant changes
+> 10 routes | 0 models | 0 components | 82 lib files | 45 env vars | 4 middleware | 20% test coverage
+> **Token savings:** this file is ~6,800 tokens. Without it, AI exploration would cost ~40,400 tokens. **Saves ~33,500 tokens per conversation.**
+> **Last scanned:** 2026-07-17 18:54 — re-run after significant changes
 
 ---
 
@@ -155,6 +155,7 @@
   - function mosaico_log_context: (meta, context_id)
   - function langfuse_span: (meta, context_id)
 - `pr_agent/mosaico/server.py` — function build_app: (), function start: () -> None
+- `pr_agent/provider_connectivity.py` — function main: () -> bool
 - `pr_agent/secret_providers/__init__.py` — function get_secret_provider: ()
 - `pr_agent/secret_providers/aws_secrets_manager_provider.py` — class AWSSecretsManagerProvider
 - `pr_agent/secret_providers/google_cloud_storage_secret_provider.py` — class GoogleCloudStorageSecretProvider
@@ -282,6 +283,10 @@
   - function check_tickets_relevancy: ()
   - function extract_tickets: (git_provider)
   - function extract_and_cache_pr_tickets: (git_provider, vars)
+- `pr_agent_settings/test_provider_connectivity.py`
+  - function unwrap: (exc)
+  - function test: (handler, provider, model)
+  - function main: ()
 - `scripts/set_pyproject_version.py` — function main: () -> None
 
 ---
@@ -383,7 +388,7 @@
 # Test Coverage
 
 > **20%** of routes and models are covered by tests
-> 100 test files found
+> 101 test files found
 
 ## Covered Routes
 
