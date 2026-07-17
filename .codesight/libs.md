@@ -194,13 +194,13 @@
   - _...2 more_
 - `pr_agent/servers/gitlab_lambda_webhook.py` — function lambda_handler: (event, context)
 - `pr_agent/servers/gitlab_webhook.py`
+  - function is_command_note: (body) -> bool
   - function is_bot_user: (data) -> bool
   - function is_draft: (data) -> bool
   - function is_draft_ready: (data) -> bool
   - function should_process_pr_logic: (data) -> bool
   - function handle_ask_line: (body, data)
-  - function start: ()
-  - _...3 more_
+  - _...4 more_
 - `pr_agent/servers/help.py` — class HelpMessage
 - `pr_agent/servers/utils.py`
   - function verify_signature: (payload_body, secret_token, signature_header)

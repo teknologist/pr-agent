@@ -16,10 +16,10 @@ from starlette_context.middleware import RawContextMiddleware
 from pr_agent.agent.pr_agent import PRAgent
 from pr_agent.algo.utils import update_settings_from_args
 from pr_agent.config_loader import get_settings, global_settings
+from pr_agent.git_providers import get_git_provider_with_context
 from pr_agent.git_providers.utils import apply_repo_settings
 from pr_agent.log import LoggingFormat, get_logger, setup_logger
 from pr_agent.secret_providers import get_secret_provider
-from pr_agent.git_providers import get_git_provider_with_context
 
 setup_logger(fmt=LoggingFormat.JSON, level=get_settings().get("CONFIG.LOG_LEVEL", "DEBUG"))
 router = APIRouter()
@@ -58,6 +58,10 @@ async def _perform_commands_gitlab(commands_conf: str, agent: PRAgent, api_url: 
                 await agent.handle_request(api_url, new_command)
         except Exception as e:
             get_logger().error(f"Failed to perform command {command}: {e}")
+
+
+def is_command_note(body: str) -> bool:
+    return body.lstrip().startswith('/')
 
 
 def is_bot_user(data) -> bool:
@@ -247,7 +251,7 @@ async def gitlab_webhook(background_tasks: BackgroundTasks, request: Request):
 
                 get_logger().debug(f'A push event has been received: {url}')
                 await _perform_commands_gitlab("push_commands", PRAgent(), url, log_context, data)
-                
+
             # for draft to ready triggered merge requests
             elif object_attributes.get('action') == 'update' and is_draft_ready(data):
                 url = object_attributes.get('url')
@@ -264,7 +268,10 @@ async def gitlab_webhook(background_tasks: BackgroundTasks, request: Request):
                 provider = get_git_provider_with_context(pr_url=url)
 
                 get_logger().info(f"A comment has been added to a merge request: {url}")
-                body = data.get('object_attributes', {}).get('note')
+                body = data.get('object_attributes', {}).get('note', '')
+                if not is_command_note(body):
+                    get_logger().debug("Ignoring GitLab note without a command")
+                    return JSONResponse(status_code=status.HTTP_200_OK, content=jsonable_encoder({"message": "success"}))
                 if data.get('object_attributes', {}).get('type') == 'DiffNote' and '/ask' in body: # /ask_line
                     body = handle_ask_line(body, data)
 

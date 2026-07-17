@@ -1,5 +1,5 @@
+import tomllib  # tomllib should be used instead of Py toml for Python 3.11+
 from pathlib import Path
-import tomllib #tomllib should be used instead of Py toml for Python 3.11+
 
 from jinja2.exceptions import SecurityError
 
@@ -63,6 +63,10 @@ def load(obj, env=None, silent=True, key=None, filename=None):
 
             if not file_path.exists():
                 get_logger().warning(f"Settings file not found: {settings_file}. Skipping it.")
+                continue
+
+            if not file_path.is_file():
+                get_logger().warning(f"Settings path is not a file: {settings_file}. Skipping it.")
                 continue
 
             if file_path.stat().st_size > MAX_TOML_SIZE_IN_BYTES:

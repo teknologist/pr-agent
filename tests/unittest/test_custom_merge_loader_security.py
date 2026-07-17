@@ -175,6 +175,14 @@ def test_load_skips_missing_files(tmp_path):
     assert obj._store == {}
 
 
+def test_load_skips_directories_named_like_toml_files(tmp_path):
+    directory = Path(tmp_path) / ".secrets.toml"
+    directory.mkdir()
+    obj = FakeDynaconf(settings_files=[str(directory)])
+    load(obj)
+    assert obj._store == {}
+
+
 def test_load_silent_true_skips_on_forbidden_directive(tmp_path):
     bad = _write(
         tmp_path,

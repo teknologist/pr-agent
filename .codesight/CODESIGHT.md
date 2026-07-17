@@ -4,7 +4,7 @@
 
 > 10 routes | 0 models | 0 components | 80 lib files | 45 env vars | 4 middleware | 20% test coverage
 > **Token savings:** this file is ~6,800 tokens. Without it, AI exploration would cost ~39,800 tokens. **Saves ~33,100 tokens per conversation.**
-> **Last scanned:** 2026-07-17 15:04 — re-run after significant changes
+> **Last scanned:** 2026-07-17 17:14 — re-run after significant changes
 
 ---
 
@@ -219,13 +219,13 @@
   - _...2 more_
 - `pr_agent/servers/gitlab_lambda_webhook.py` — function lambda_handler: (event, context)
 - `pr_agent/servers/gitlab_webhook.py`
+  - function is_command_note: (body) -> bool
   - function is_bot_user: (data) -> bool
   - function is_draft: (data) -> bool
   - function is_draft_ready: (data) -> bool
   - function should_process_pr_logic: (data) -> bool
   - function handle_ask_line: (body, data)
-  - function start: ()
-  - _...3 more_
+  - _...4 more_
 - `pr_agent/servers/help.py` — class HelpMessage
 - `pr_agent/servers/utils.py`
   - function verify_signature: (payload_body, secret_token, signature_header)
