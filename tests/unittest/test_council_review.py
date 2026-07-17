@@ -7,12 +7,10 @@ import pytest
 import yaml
 
 from pr_agent.config_loader import get_settings
-from pr_agent.tools.council_review import (
-    CouncilReviewConfig,
-    CouncilReviewError,
-    CouncilReviewRunner,
-    resolve_council_review_config,
-)
+from pr_agent.tools.council_review import (CouncilReviewConfig,
+                                           CouncilReviewError,
+                                           CouncilReviewRunner,
+                                           resolve_council_review_config)
 from pr_agent.tools.pr_reviewer import PRReviewer
 
 _VALID_REVIEW = """review:
@@ -43,6 +41,23 @@ _VALID_REVIEW_WITH_SHORT_DIFF_FINDING = _VALID_REVIEW_WITH_FINDING.replace("raw 
 _VALID_REVIEW_WITH_NUMBERED_DIFF_FINDING = _VALID_REVIEW_WITH_FINDING.replace(
     "raw diff with secret line",
     "API_KEY = 'topsecret'",
+)
+_VALID_REVIEW_WITH_SECRET_VALUE = _VALID_REVIEW_WITH_FINDING.replace("raw diff with secret line", "topsecret")
+_VALID_REVIEW_WITH_SECRET_PROSE = _VALID_REVIEW_WITH_FINDING.replace(
+    "raw diff with secret line",
+    "Rotate topsecret immediately",
+)
+_VALID_REVIEW_WITH_COMMON_PROSE = _VALID_REVIEW_WITH_FINDING.replace(
+    "raw diff with secret line",
+    "define return values",
+)
+_VALID_REVIEW_WITH_QUOTED_COMMON_PROSE = _VALID_REVIEW_WITH_FINDING.replace(
+    "raw diff with secret line",
+    "Do not forget return values",
+)
+_VALID_REVIEW_WITH_DELIBERATION_LABEL = _VALID_REVIEW_WITH_FINDING.replace(
+    "raw diff with secret line",
+    "response_1 ranked first",
 )
 
 _VALID_PEER_EVALUATION = """peer_evaluation:
@@ -260,7 +275,7 @@ class FakeAiHandler:
             "system": system,
             "user": user,
             "inference_settings": inference_settings,
-            "deployment_id": get_settings().get("openai.deployment_id", None),
+            "deployment_id": getattr(inference_settings, "deployment_id", None),
         })
         FakeAiHandler.active_calls += 1
         FakeAiHandler.max_active_calls = max(FakeAiHandler.max_active_calls, FakeAiHandler.active_calls)
@@ -687,6 +702,8 @@ def test_incremental_council_uses_current_scoped_provider_evidence_for_each_memb
         ("raw diff with secret line", _VALID_REVIEW_WITH_FINDING, "raw diff with secret line"),
         ("+secret", _VALID_REVIEW_WITH_SHORT_DIFF_FINDING, "secret"),
         ("12 +API_KEY = 'topsecret'", _VALID_REVIEW_WITH_NUMBERED_DIFF_FINDING, "API_KEY = 'topsecret'"),
+        ("12 +API_KEY = 'topsecret'", _VALID_REVIEW_WITH_SECRET_VALUE, "topsecret"),
+        ("12 +API_KEY = topsecret", _VALID_REVIEW_WITH_SECRET_PROSE, "topsecret"),
     ],
 )
 def test_member_review_diff_content_is_redacted_before_chair(
@@ -715,6 +732,39 @@ def test_member_review_diff_content_is_redacted_before_chair(
     assert result.metadata["successful_member_count"] == 2
     assert secret_text not in FakeAiHandler.calls[-1]["user"]
     assert "[redacted" in FakeAiHandler.calls[-1]["user"]
+
+
+@pytest.mark.parametrize(
+    ("source_diff", "member_review", "expected_prose"),
+    [
+        ("+def", _VALID_REVIEW_WITH_COMMON_PROSE, "define return values"),
+        ('+method = "get"', _VALID_REVIEW_WITH_QUOTED_COMMON_PROSE, "Do not forget return values"),
+    ],
+)
+def test_short_diff_tokens_do_not_corrupt_unrelated_review_prose(
+    monkeypatch,
+    council_settings,
+    source_diff,
+    member_review,
+    expected_prose,
+):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: source_diff)
+    _reset_fake_handler({
+        "member-a": member_review,
+        "member-b": _VALID_REVIEW,
+        "chair": _VALID_REVIEW,
+    })
+
+    asyncio.run(_runner(config).run())
+
+    assert expected_prose in FakeAiHandler.calls[-1]["user"]
 
 
 def test_malformed_member_does_not_count_toward_quorum_but_successful_reviews_go_to_chair(
@@ -857,7 +907,7 @@ async def test_parse_failure_records_available_token_usage(monkeypatch, council_
     result = await _runner(config, ai_handler_factory=LifecycleAiHandler).run()
 
     failed_member = next(call for call in result.metadata["calls"] if call["outcome"] == "failure")
-    assert "model" not in failed_member
+    assert failed_member["model"] == "member-b"
     assert failed_member["token_usage"] == {"total_tokens": 17}
 
 
@@ -908,7 +958,7 @@ async def test_member_timeout_is_recorded_and_stage_settles(monkeypatch, council
         council_settings.config.ai_timeout = original_timeout
 
     timed_out_member = next(call for call in result.metadata["calls"] if call["outcome"] == "timeout")
-    assert "model" not in timed_out_member
+    assert timed_out_member["model"] == "member-b"
     assert LifecycleAiHandler.cancelled_calls == 1
     assert LifecycleAiHandler.active_calls == 0
 
@@ -1083,7 +1133,7 @@ def test_council_logs_and_metadata_exclude_raw_outputs(monkeypatch, council_sett
     }
     assert all({"strategy", "stage", "role", "duration_ms", "outcome"} <= set(call)
                for call in result.metadata["calls"])
-    assert all((call["outcome"] == "success") == ("model" in call) for call in result.metadata["calls"])
+    assert all("model" in call for call in result.metadata["calls"])
 
 
 def test_council_token_usage_metadata_excludes_non_numeric_provider_fields(monkeypatch, council_settings):
@@ -1239,7 +1289,11 @@ def test_chair_fallbacks_are_attempted_in_order_with_chair_inference_settings(mo
         "fallback-a-deployment",
         "fallback-b-deployment",
     ]
-    assert all(call["inference_settings"] == config.chair.inference_settings for call in chair_calls)
+    assert all(
+        call["inference_settings"].temperature == config.chair.inference_settings.temperature
+        and call["inference_settings"].reasoning_effort == config.chair.inference_settings.reasoning_effort
+        for call in chair_calls
+    )
     assert result.metadata["chair_model"] == "fallback-b"
     assert result.metadata["synthesis_strategy"] == "chair"
     assert result.metadata["fallback_decisions"] == {
@@ -1247,6 +1301,80 @@ def test_chair_fallbacks_are_attempted_in_order_with_chair_inference_settings(mo
         "chair_fallback": "used",
         "member_fallback": "not_used",
     }
+
+
+def test_primary_chair_runs_before_invalid_fallback_deployment_is_needed(monkeypatch, council_settings):
+    original_fallback_models = copy.deepcopy(council_settings.config.fallback_models)
+    original_deployment_id = council_settings.get("openai.deployment_id", None)
+    original_fallback_deployments = copy.deepcopy(council_settings.get("openai.fallback_deployments", []))
+    council_settings.config.fallback_models = ["fallback-a", "fallback-b"]
+    council_settings.set("openai.deployment_id", "chair-deployment")
+    council_settings.set("openai.fallback_deployments", ["fallback-a-deployment"])
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({"member-a": _VALID_REVIEW, "member-b": _VALID_REVIEW, "chair": _VALID_REVIEW})
+
+    try:
+        result = asyncio.run(_runner(config).run())
+    finally:
+        council_settings.config.fallback_models = original_fallback_models
+        council_settings.set("openai.deployment_id", original_deployment_id)
+        council_settings.set("openai.fallback_deployments", original_fallback_deployments)
+
+    assert result.metadata["chair_model"] == "chair"
+    assert [call["model"] for call in FakeAiHandler.calls if call["stage"] == "chair"] == ["chair"]
+
+
+def test_chair_output_with_internal_deliberation_labels_is_rejected(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": False,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": _VALID_REVIEW,
+        "chair": _VALID_REVIEW_WITH_DELIBERATION_LABEL,
+    })
+
+    with pytest.raises(CouncilReviewError, match="chair synthesis"):
+        asyncio.run(_runner(config).run())
+
+
+def test_member_fallback_accepts_complete_rankings_without_rationale(monkeypatch, council_settings):
+    council_settings.set("pr_council_review", {
+        "enabled": True,
+        "peer_evaluation": True,
+        "members": [{"model": "member-a"}, {"model": "member-b"}],
+        "chair": {"model": "chair"},
+    })
+    config = resolve_council_review_config()
+    monkeypatch.setattr("pr_agent.tools.council_review.get_pr_diff", lambda *args, **kwargs: "raw diff")
+    ranking_only = """peer_evaluation:
+  ranking:
+  - response_1
+  - response_2
+"""
+    _reset_fake_handler({
+        "member-a": _VALID_REVIEW,
+        "member-b": _VALID_REVIEW,
+        "member-a:peer": ranking_only,
+        "member-b:peer": ranking_only,
+        "chair": RuntimeError("chair unavailable"),
+    })
+
+    result = asyncio.run(_runner(config).run())
+
+    assert result.metadata["synthesis_strategy"] == "member_fallback"
 
 
 def test_member_fallback_uses_borda_winner_after_all_chairs_fail(monkeypatch, council_settings):
@@ -1565,6 +1693,36 @@ async def test_pr_reviewer_runs_council_for_every_review_mode(
 
 
 @pytest.mark.asyncio
+async def test_pr_reviewer_does_not_log_rendered_council_output(monkeypatch, council_settings):
+    original_publish_output = council_settings.config.publish_output
+    council_settings.config.publish_output = False
+    reviewer = _reviewer_for_integration_run()
+    reviewer._prepare_pr_review.return_value = "private rendered chair output"
+    council_config = CouncilReviewConfig(enabled=True)
+    runner = MagicMock()
+    runner.run = AsyncMock(return_value=SimpleNamespace(
+        prediction=_VALID_REVIEW,
+        metadata={"strategy": "council_review"},
+    ))
+    logger = MagicMock()
+
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.get_logger", lambda: logger)
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.resolve_council_review_config", lambda: council_config)
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.CouncilReviewRunner", MagicMock(return_value=runner))
+    try:
+        await reviewer.run()
+    finally:
+        council_settings.config.publish_output = original_publish_output
+
+    assert "private rendered chair output" not in repr(logger.mock_calls)
+    logger.debug.assert_any_call(
+        "Council Review output prepared",
+        artifact={"strategy": "council_review"},
+    )
+
+
+@pytest.mark.asyncio
 async def test_pr_reviewer_runtime_no_quorum_does_not_run_standard_review_or_publish_member_result(
     monkeypatch,
     council_settings,
@@ -1666,6 +1824,50 @@ async def test_invalid_config_notice_is_in_published_standard_review(monkeypatch
     assert published_review.startswith(
         "**Council Review notice**: Invalid Council Review configuration; Standard Review was used."
     )
+
+
+def test_council_attribution_preserves_standard_review_header(monkeypatch):
+    reviewer = _reviewer_for_integration_run()
+    reviewer.prediction = _VALID_REVIEW
+    reviewer.council_review_metadata = {"strategy": "council_review", "warnings": []}
+    reviewer.set_review_labels = MagicMock()
+    reviewer.git_provider.is_supported.return_value = False
+    reviewer.git_provider.get_diff_files.return_value = []
+    monkeypatch.setattr(
+        "pr_agent.tools.pr_reviewer.convert_to_markdown_v2",
+        lambda *args, **kwargs: "## PR Reviewer Guide 🔍\n\nReview body",
+    )
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.github_action_output", lambda *args, **kwargs: None)
+
+    published_review = PRReviewer._prepare_pr_review(reviewer)
+
+    assert published_review.startswith(
+        "## PR Reviewer Guide 🔍\n\n"
+        "**Council Review**: synthesized from independent member reviews.\n\n"
+        "Review body"
+    )
+
+
+def test_member_fallback_attribution_does_not_claim_chair_synthesis(monkeypatch):
+    reviewer = _reviewer_for_integration_run()
+    reviewer.prediction = _VALID_REVIEW
+    reviewer.council_review_metadata = {
+        "strategy": "council_review",
+        "synthesis_strategy": "member_fallback",
+        "warnings": [],
+    }
+    reviewer.set_review_labels = MagicMock()
+    reviewer.git_provider.is_supported.return_value = False
+    reviewer.git_provider.get_diff_files.return_value = []
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.convert_to_markdown_v2", lambda *args, **kwargs: "Review body")
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.github_action_output", lambda *args, **kwargs: None)
+
+    published_review = PRReviewer._prepare_pr_review(reviewer)
+
+    assert published_review.startswith(
+        "**Council Review**: selected by anonymized peer evaluation.\n\nReview body"
+    )
+    assert "synthesized" not in published_review
 
 
 def test_unsupported_override_warning_is_sanitized_and_logged(monkeypatch, council_settings):
@@ -1800,3 +2002,62 @@ async def test_terminal_failure_comment_is_concise_and_never_runs_standard_revie
 
     standard_review.assert_not_awaited()
     assert reviewer.git_provider.publish_comment.call_args_list[-1].args == (terminal_message,)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_council_review_cleans_up_temporary_comment(monkeypatch, council_settings):
+    original_publish_output = council_settings.config.publish_output
+    original_is_auto_command = council_settings.config.get("is_auto_command", False)
+    council_settings.config.publish_output = True
+    council_settings.config.is_auto_command = False
+    reviewer = _reviewer_for_integration_run()
+    council_config = CouncilReviewConfig(enabled=True)
+    runner = MagicMock()
+    runner.run = AsyncMock(side_effect=asyncio.CancelledError())
+
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.resolve_council_review_config", lambda: council_config)
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.CouncilReviewRunner", MagicMock(return_value=runner))
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await reviewer.run()
+    finally:
+        council_settings.config.publish_output = original_publish_output
+        council_settings.config.is_auto_command = original_is_auto_command
+
+    reviewer.git_provider.remove_initial_comment.assert_called_once_with()
+    assert reviewer.git_provider.publish_comment.call_args_list == [
+        (("Preparing review...",), {"is_temporary": True}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unexpected_council_failure_is_sanitized_and_cleans_up_temporary_comment(
+    monkeypatch,
+    council_settings,
+):
+    original_publish_output = council_settings.config.publish_output
+    original_is_auto_command = council_settings.config.get("is_auto_command", False)
+    council_settings.config.publish_output = True
+    council_settings.config.is_auto_command = False
+    reviewer = _reviewer_for_integration_run()
+    council_config = CouncilReviewConfig(enabled=True)
+    runner = MagicMock()
+    runner.run = AsyncMock(side_effect=RuntimeError("private provider failure"))
+
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.resolve_council_review_config", lambda: council_config)
+    monkeypatch.setattr("pr_agent.tools.pr_reviewer.CouncilReviewRunner", MagicMock(return_value=runner))
+    try:
+        await reviewer.run()
+    finally:
+        council_settings.config.publish_output = original_publish_output
+        council_settings.config.is_auto_command = original_is_auto_command
+
+    reviewer.git_provider.remove_initial_comment.assert_called_once_with()
+    published_comments = [call.args[0] for call in reviewer.git_provider.publish_comment.call_args_list]
+    assert published_comments == [
+        "Preparing review...",
+        "Council Review failed unexpectedly.",
+    ]
+    assert "private provider failure" not in repr(reviewer.git_provider.mock_calls)

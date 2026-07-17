@@ -6,10 +6,11 @@ import pytest
 import pr_agent.algo.ai_handlers.openai_ai_handler as openai_handler
 
 
-def test_openai_handler_does_not_claim_council_redaction_support():
+def test_openai_handler_enables_council_redaction_support():
     handler = openai_handler.OpenAIHandler.__new__(openai_handler.OpenAIHandler)
 
-    assert handler.enable_council_redaction() is False
+    assert handler.enable_council_redaction() is True
+    assert handler.suppress_raw_logging is True
 
 
 @pytest.mark.asyncio

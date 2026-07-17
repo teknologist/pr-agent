@@ -2,14 +2,12 @@ from os import environ
 
 import openai
 from openai import AsyncOpenAI
-from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt
+from tenacity import (retry, retry_if_exception_type,
+                      retry_if_not_exception_type, stop_after_attempt)
 
-from pr_agent.algo.ai_handlers.base_ai_handler import (
-    UNSET,
-    BaseAiHandler,
-    ChatCompletionResult,
-    ModelInferenceSettings,
-)
+from pr_agent.algo.ai_handlers.base_ai_handler import (UNSET, BaseAiHandler,
+                                                       ChatCompletionResult,
+                                                       ModelInferenceSettings)
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 
@@ -17,6 +15,8 @@ OPENAI_RETRIES = 5
 
 
 class OpenAIHandler(BaseAiHandler):
+    supports_council_redaction = True
+
     def __init__(self):
         # Initialize OpenAIHandler specific attributes here
         try:

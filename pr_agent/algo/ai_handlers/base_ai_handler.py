@@ -14,6 +14,7 @@ UNSET = _UnsetInferenceSetting()
 class ModelInferenceSettings:
     temperature: float | _UnsetInferenceSetting = UNSET
     reasoning_effort: str | _UnsetInferenceSetting = UNSET
+    deployment_id: str | None | _UnsetInferenceSetting = UNSET
 
 
 @dataclass(frozen=True)

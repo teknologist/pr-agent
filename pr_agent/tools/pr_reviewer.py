@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import datetime
 import traceback
@@ -12,8 +13,8 @@ from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
 from pr_agent.algo.pr_processing import (add_ai_metadata_to_diff_files,
                                          get_pr_diff,
                                          retry_with_fallback_models)
-from pr_agent.algo.skills_loader import get_skills_context
 from pr_agent.algo.repo_context import build_repo_context
+from pr_agent.algo.skills_loader import get_skills_context
 from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.utils import (ModelType, PRReviewHeader,
                                  convert_to_markdown_v2, github_action_output,
@@ -25,14 +26,17 @@ from pr_agent.git_providers.git_provider import (IncrementalPR,
                                                  get_main_pr_language)
 from pr_agent.log import get_logger
 from pr_agent.servers.help import HelpMessage
-from pr_agent.tools.council_review import (
-    CouncilReviewError, CouncilReviewRunner, resolve_council_review_config)
+from pr_agent.tools.council_review import (CouncilReviewError,
+                                           CouncilReviewRunner,
+                                           resolve_council_review_config)
 from pr_agent.tools.ticket_pr_compliance_check import (
     extract_and_cache_pr_tickets, extract_tickets)
 
 _COUNCIL_ATTRIBUTION = "**Council Review**: synthesized from independent member reviews."
+_COUNCIL_MEMBER_FALLBACK_ATTRIBUTION = "**Council Review**: selected by anonymized peer evaluation."
 _INVALID_CONFIG_NOTICE = "**Council Review notice**: Invalid Council Review configuration; Standard Review was used."
 _UNSUPPORTED_OVERRIDE_NOTICE = "**Council Review notice**: An unsupported inference override was ignored."
+_UNEXPECTED_COUNCIL_FAILURE_NOTICE = "Council Review failed unexpectedly."
 
 
 class PRReviewer:
@@ -190,6 +194,18 @@ class PRReviewer:
                     if get_settings().config.publish_output:
                         self.git_provider.publish_comment(e.public_message)
                     return None
+                except asyncio.CancelledError:
+                    self.git_provider.remove_initial_comment()
+                    raise
+                except Exception:
+                    get_logger().warning(
+                        "Council Review failed unexpectedly without Standard Review fallback",
+                        artifact={"strategy": "council_review", "stage": "terminal_failure"},
+                    )
+                    self.git_provider.remove_initial_comment()
+                    if get_settings().config.publish_output:
+                        self.git_provider.publish_comment(_UNEXPECTED_COUNCIL_FAILURE_NOTICE)
+                    return None
             else:
                 config_warnings = council_config.warnings if council_config else []
                 self.council_review_metadata = {
@@ -203,7 +219,10 @@ class PRReviewer:
                 return None
 
             pr_review = self._prepare_pr_review()
-            get_logger().debug(f"PR output", artifact=pr_review)
+            if self.council_review_metadata.get("strategy") == "council_review":
+                get_logger().debug("Council Review output prepared", artifact={"strategy": "council_review"})
+            else:
+                get_logger().debug("PR output", artifact=pr_review)
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
             if not should_publish:
@@ -312,10 +331,19 @@ class PRReviewer:
         council_metadata = getattr(self, "council_review_metadata", {})
         council_context = self._get_council_review_notices()
         if council_metadata.get("strategy") == "council_review":
-            council_context.insert(0, _COUNCIL_ATTRIBUTION)
+            attribution = (
+                _COUNCIL_MEMBER_FALLBACK_ATTRIBUTION
+                if council_metadata.get("synthesis_strategy") == "member_fallback"
+                else _COUNCIL_ATTRIBUTION
+            )
+            council_context.insert(0, attribution)
         if council_context:
             council_context_text = "\n\n".join(council_context)
-            markdown_text = f"{council_context_text}\n\n{markdown_text}"
+            header, separator, body = markdown_text.partition("\n")
+            if separator and header.startswith("## "):
+                markdown_text = f"{header}\n\n{council_context_text}\n\n{body.lstrip()}"
+            else:
+                markdown_text = f"{council_context_text}\n\n{markdown_text}"
 
         # Add help text if gfm_markdown is supported
         if self.git_provider.is_supported("gfm_markdown") and get_settings().pr_reviewer.enable_help_text:

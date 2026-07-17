@@ -15,8 +15,9 @@ from pr_agent.algo import (CLAUDE_EXTENDED_THINKING_MODELS,
                            STREAMING_REQUIRED_MODELS,
                            SUPPORT_REASONING_EFFORT_MODELS,
                            USER_MESSAGE_ONLY_MODELS)
-from pr_agent.algo.ai_handlers.base_ai_handler import (
-    UNSET, BaseAiHandler, ChatCompletionResult, ModelInferenceSettings)
+from pr_agent.algo.ai_handlers.base_ai_handler import (UNSET, BaseAiHandler,
+                                                       ChatCompletionResult,
+                                                       ModelInferenceSettings)
 from pr_agent.algo.ai_handlers.litellm_helpers import (
     MockResponse, _get_azure_ad_token, _handle_streaming_response,
     _process_litellm_extra_body)
@@ -510,17 +511,22 @@ class LiteLLMAIHandler(BaseAiHandler):
                     if request_reasoning_effort
                     else settings.config.reasoning_effort
                 )
-                deployment_id = self.deployment_id
-                # Capture the original model string so an explicit provider prefix in the
-                # user config (e.g. "azure/gpt-5...") can be preserved when the GPT-5 branch
-                # rebuilds the routed model name below.
-                user_model = model
+                request_deployment_id = (
+                    inference_settings is not None and inference_settings.deployment_id is not UNSET
+                )
+                deployment_id = (
+                    inference_settings.deployment_id if request_deployment_id else self.deployment_id
+                )
                 # Capture the provider prefix before any rewriting below. Databricks auth/endpoint
                 # selection keys off this; rewriting (e.g. 'azure/' + model when Azure is enabled in
                 # a multi-provider config) would otherwise hide the 'databricks/' prefix and bypass
                 # the guards that keep Databricks on its own DATABRICKS_API_KEY/DATABRICKS_API_BASE.
                 is_databricks = model.startswith("databricks/")
-                if self.azure and not is_databricks:
+                explicit_provider = model.split("/", 1)[0] if "/" in model else None
+                if suppress_raw_logging and explicit_provider and not request_deployment_id:
+                    deployment_id = None
+                is_external_provider = explicit_provider not in {None, "openai", "azure"}
+                if self.azure and not is_external_provider:
                     model = 'azure/' + model
                 if 'claude' in model and not system:
                     system = "No system prompt provided"
@@ -559,9 +565,7 @@ class LiteLLMAIHandler(BaseAiHandler):
                 # and Azure mode auto-prepends "azure/", which together can produce stacked prefixes
                 # like "azure/openai/gpt-5...". Without normalization the GPT-5 path is skipped and
                 # litellm rejects the request with UnsupportedParamsError for temperature=0.2.
-                model_base = model
-                while model_base.startswith(('openai/', 'azure/')):
-                    model_base = model_base.removeprefix('openai/').removeprefix('azure/')
+                model_base = model.rsplit('/', 1)[-1]
                 if model_base.startswith('gpt-5'):
                     # Use request-scoped reasoning_effort, configured reasoning_effort,
                     # or default to MEDIUM.
@@ -591,18 +595,12 @@ class LiteLLMAIHandler(BaseAiHandler):
                         "allowed_openai_params": ["reasoning_effort"],
                     }
                     get_logger().info(f"Using reasoning_effort='{effort}' for GPT-5 model")
-                    # Routing priority: Azure mode > explicit provider prefix in user config > openai/
-                    # default. This preserves an explicit "azure/" the user wrote in config even when
-                    # self.azure is false, and avoids stacking when self.azure already added "azure/".
                     if self.azure:
-                        provider_prefix = 'azure/'
-                    elif user_model.startswith('azure/'):
-                        provider_prefix = 'azure/'
-                    elif user_model.startswith('openai/'):
-                        provider_prefix = 'openai/'
+                        model = f"azure/{model_base.replace('_thinking', '')}"
+                    elif "/" not in model:
+                        model = f"openai/{model_base.replace('_thinking', '')}"
                     else:
-                        provider_prefix = 'openai/'
-                    model = provider_prefix + model_base.replace('_thinking', '')  # remove _thinking suffix
+                        model = model.replace('_thinking', '')
 
                 # Currently, some models do not support a separate system and user prompts
                 if model in self.user_message_only_models or get_settings().config.custom_reasoning_model:
@@ -615,7 +613,12 @@ class LiteLLMAIHandler(BaseAiHandler):
                 # Databricks selects its endpoint via the DATABRICKS_API_BASE env var; don't let an
                 # api_base configured by another provider (OpenRouter/Ollama/Azure AD/OpenAI) during
                 # __init__ override it in multi-provider configs. None lets LiteLLM read the env var.
-                api_base = os.environ.get("DATABRICKS_API_BASE") if is_databricks else self.api_base
+                if is_databricks:
+                    api_base = os.environ.get("DATABRICKS_API_BASE")
+                elif suppress_raw_logging and is_external_provider:
+                    api_base = None
+                else:
+                    api_base = self.api_base
                 kwargs = {
                         "model": model,
                         "deployment_id": deployment_id,
@@ -773,7 +776,8 @@ class LiteLLMAIHandler(BaseAiHandler):
                 # Databricks authenticates via the DATABRICKS_API_KEY/DATABRICKS_API_BASE env vars,
                 # so don't override it with another provider's key in multi-provider configs.
                 if (litellm.api_key and litellm.api_key != DUMMY_LITELLM_API_KEY
-                        and not is_databricks):
+                        and not is_databricks
+                        and not (suppress_raw_logging and is_external_provider)):
                     kwargs["api_key"] = litellm.api_key
 
                 # Get completion with automatic streaming detection

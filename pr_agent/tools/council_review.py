@@ -4,18 +4,15 @@ import asyncio
 import copy
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 import yaml
 from jinja2 import Environment, StrictUndefined
 
-from pr_agent.algo.ai_handlers.base_ai_handler import (
-    BaseAiHandler,
-    ModelInferenceSettings,
-    UNSET,
-)
-from pr_agent.algo.pr_processing import _get_all_deployments, get_pr_diff
+from pr_agent.algo.ai_handlers.base_ai_handler import (UNSET, BaseAiHandler,
+                                                       ModelInferenceSettings)
+from pr_agent.algo.pr_processing import get_pr_diff
 from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.utils import load_yaml
 from pr_agent.config_loader import get_settings
@@ -63,7 +60,11 @@ _CONTRIBUTION_TIME_COST_SCHEMA = {"best_case": str, "average_case": str, "worst_
 _TODO_SECTION_SCHEMA = {"relevant_file": str, "line_number": int, "content": str}
 _SUB_PR_SCHEMA = {"relevant_files": list, "title": str}
 _NUMBERED_DIFF_LINE = re.compile(r"^\d+\s+[ +\-](.*)$")
-_MAX_COUNCIL_FAN_OUT = 5
+_QUOTED_DIFF_VALUE = re.compile(r"(['\"])(.+?)\1")
+_SENSITIVE_ASSIGNMENT_VALUE = re.compile(
+    r"(?i)\b(?:api[_-]?key|token|secret|password|credential)\b\s*=\s*(.+)$"
+)
+_COUNCIL_INTERNAL_LABEL = re.compile(r"\b(?:response|evaluator)_\d+\b")
 _TOKEN_USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens")
 
 
@@ -85,19 +86,14 @@ class CouncilReviewConfig:
 @dataclass(frozen=True)
 class CouncilMemberReview:
     label: str
-    model: str
-    response: str
     parsed: dict[str, Any]
-    metadata: dict[str, Any]
     source_diff: str
 
 
 @dataclass(frozen=True)
 class CouncilPeerEvaluation:
     evaluator_label: str
-    response: str
     parsed: dict[str, Any]
-    metadata: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -254,15 +250,21 @@ class CouncilReviewRunner:
         chair_model = None
         chair_models = [self.config.chair.model, *_get_fallback_models()]
         original_deployment_id = get_settings().get("openai.deployment_id", None)
+        fallback_deployments = get_settings().get("openai.fallback_deployments", [])
+        if not isinstance(fallback_deployments, list) and fallback_deployments:
+            fallback_deployments = [deployment.strip() for deployment in fallback_deployments.split(",")]
+        deployments = [original_deployment_id, *fallback_deployments]
         try:
-            chair_attempts = zip(chair_models, _get_all_deployments(chair_models))
-            for model, deployment_id in chair_attempts:
+            for index, model in enumerate(chair_models):
+                if fallback_deployments and index >= len(deployments):
+                    raise ValueError("A fallback chair deployment is missing")
+                deployment_id = deployments[index] if fallback_deployments else original_deployment_id
                 try:
-                    get_settings().set("openai.deployment_id", deployment_id)
-                    chair_response, _ = await self._run_chair(
+                    chair_response = await self._run_chair(
                         model,
                         successful_reviews,
                         peer_evaluations,
+                        deployment_id=deployment_id,
                     )
                     chair_model = model
                     break
@@ -279,9 +281,6 @@ class CouncilReviewRunner:
                 member_fallback="not_evaluated",
             )
             raise CouncilReviewError("Council Review failed during chair synthesis.") from exc
-        finally:
-            get_settings().set("openai.deployment_id", original_deployment_id)
-
         synthesis_strategy = "chair"
         if chair_response is None:
             member_fallback = _select_member_fallback(successful_reviews, peer_evaluations)
@@ -327,7 +326,8 @@ class CouncilReviewRunner:
         return CouncilReviewResult(prediction=chair_response, metadata=metadata)
 
     async def _run_member(self, member: CouncilModelConfig, index: int) -> CouncilMemberReview:
-        patches_diff = get_pr_diff(
+        patches_diff = await asyncio.to_thread(
+            get_pr_diff,
             self.git_provider,
             self.token_handler,
             member.model,
@@ -341,7 +341,7 @@ class CouncilReviewRunner:
         variables["diff"] = patches_diff
         system_prompt = _render_prompt(get_settings().pr_review_prompt.system, variables)
         user_prompt = _render_prompt(get_settings().pr_review_prompt.user, variables)
-        result, parsed = await self._complete_call(
+        parsed = await self._complete_call(
             stage="independent_review",
             role="member",
             participant=member,
@@ -351,10 +351,7 @@ class CouncilReviewRunner:
         )
         return CouncilMemberReview(
             label=f"response_{index}",
-            model=member.model,
-            response=result.response,
             parsed=parsed,
-            metadata=result.metadata,
             source_diff=patches_diff,
         )
 
@@ -373,7 +370,7 @@ class CouncilReviewRunner:
         system_prompt = _render_prompt(get_settings().pr_council_review_prompt.peer_system, variables)
         user_prompt = _render_prompt(get_settings().pr_council_review_prompt.peer_user, variables)
         expected_labels = [review.label for review in member_reviews]
-        result, parsed = await self._complete_call(
+        parsed = await self._complete_call(
             stage="peer_evaluation",
             role="peer",
             participant=member,
@@ -383,9 +380,7 @@ class CouncilReviewRunner:
         )
         return CouncilPeerEvaluation(
             evaluator_label=f"evaluator_{index}",
-            response=result.response,
             parsed=parsed,
-            metadata=result.metadata,
         )
 
     async def _run_chair(
@@ -393,7 +388,9 @@ class CouncilReviewRunner:
         model: str,
         member_reviews: list[CouncilMemberReview],
         peer_evaluations: list[CouncilPeerEvaluation],
-    ) -> tuple[str, dict[str, Any]]:
+        *,
+        deployment_id: str | None,
+    ) -> str:
         variables = copy.deepcopy(self.vars)
         variables.update({
             "member_reviews": _format_member_reviews(member_reviews),
@@ -404,8 +401,11 @@ class CouncilReviewRunner:
         variables.pop("diff", None)
         system_prompt = _render_prompt(get_settings().pr_council_review_prompt.system, variables)
         user_prompt = _render_prompt(get_settings().pr_council_review_prompt.user, variables)
-        participant = CouncilModelConfig(model=model, inference_settings=self.config.chair.inference_settings)
-        result, parsed = await self._complete_call(
+        participant = CouncilModelConfig(
+            model=model,
+            inference_settings=replace(self.config.chair.inference_settings, deployment_id=deployment_id),
+        )
+        parsed = await self._complete_call(
             stage="chair_synthesis",
             role="chair",
             participant=participant,
@@ -413,14 +413,12 @@ class CouncilReviewRunner:
             user_prompt=user_prompt,
             parse_response=lambda response: _parse_review_prediction(response, variables),
         )
-        return yaml.safe_dump(parsed, sort_keys=False), result.metadata
+        prediction = yaml.safe_dump(parsed, sort_keys=False)
+        if _COUNCIL_INTERNAL_LABEL.search(prediction):
+            raise CouncilReviewError("Council chair returned deliberation details")
+        return prediction
 
     async def _run_stage(self, operations: list[Any]) -> list[Any]:
-        if len(operations) > _MAX_COUNCIL_FAN_OUT:
-            for operation in operations:
-                operation.close()
-            raise CouncilReviewError("Council Review stage exceeds the five-member fan-out limit.")
-
         tasks = [asyncio.create_task(operation) for operation in operations]
         try:
             return await asyncio.gather(*tasks, return_exceptions=True)
@@ -439,7 +437,7 @@ class CouncilReviewRunner:
         system_prompt: str,
         user_prompt: str,
         parse_response: Callable[[str], Any],
-    ) -> tuple[Any, Any]:
+    ) -> Any:
         started_at = asyncio.get_running_loop().time()
         result = None
         token_usage = None
@@ -464,12 +462,12 @@ class CouncilReviewRunner:
         except asyncio.CancelledError:
             self._record_call(stage, role, participant.model, started_at, "cancelled", token_usage)
             raise
-        except BaseException:
+        except Exception:
             self._record_call(stage, role, participant.model, started_at, "failure", token_usage)
             raise
 
         self._record_call(stage, role, participant.model, started_at, "success", token_usage)
-        return result, parsed
+        return parsed
 
     def _record_call(
         self,
@@ -487,8 +485,7 @@ class CouncilReviewRunner:
             "duration_ms": round((asyncio.get_running_loop().time() - started_at) * 1000, 3),
             "outcome": outcome,
         }
-        if outcome == "success":
-            metadata["model"] = model
+        metadata["model"] = model
         if token_usage is not None:
             metadata["token_usage"] = token_usage
         self.call_metadata.append(metadata)
@@ -727,7 +724,7 @@ def _parse_peer_evaluation(response: str, expected_labels: list[str]) -> dict[st
 
     evaluation = data["peer_evaluation"]
     ranking = evaluation.get("ranking")
-    rationale = evaluation.get("rationale")
+    rationale = evaluation.get("rationale", "")
     if (
         not isinstance(ranking, list)
         or not all(isinstance(label, str) for label in ranking)
@@ -772,7 +769,26 @@ def _redact_review_data(value: Any, source_diff: str) -> Any:
         stripped_line = line.strip()
         numbered_match = _NUMBERED_DIFF_LINE.match(stripped_line)
         diff_payload = numbered_match.group(1).strip() if numbered_match else stripped_line.lstrip("+- ").strip()
-        for sensitive_text in {stripped_line, diff_payload}:
-            if len(sensitive_text) >= 3:
-                redacted_value = redacted_value.replace(sensitive_text, "[redacted diff line]")
+        sensitive_texts = {
+            text for text in (stripped_line, diff_payload)
+            if len(text) >= 12
+        }
+        sensitive_texts.update(
+            match.group(2) for match in _QUOTED_DIFF_VALUE.finditer(diff_payload)
+            if len(match.group(2)) >= 3
+        )
+        assignment_match = _SENSITIVE_ASSIGNMENT_VALUE.search(diff_payload)
+        if assignment_match:
+            assignment_value = assignment_match.group(1).strip().strip("'\"")
+            if len(assignment_value) >= 3:
+                sensitive_texts.add(assignment_value)
+        if len(diff_payload) >= 3 and redacted_value.strip() == diff_payload:
+            return "[redacted diff line]"
+        for sensitive_text in sensitive_texts:
+            pattern = re.escape(sensitive_text)
+            if sensitive_text[0].isalnum():
+                pattern = rf"(?<!\w){pattern}"
+            if sensitive_text[-1].isalnum():
+                pattern = rf"{pattern}(?!\w)"
+            redacted_value = re.sub(pattern, "[redacted diff line]", redacted_value)
     return redacted_value
